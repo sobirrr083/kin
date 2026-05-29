@@ -33,7 +33,7 @@ from database.queries import (
     remove_required_chat,
     update_chat_member_count,
 )
-from filters.admin import IsAdmin
+
 from keyboards.inline import (
     kb_admin_back,
     kb_admin_main,
