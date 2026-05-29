@@ -1,6 +1,5 @@
 """
-middlewares/subscription.py — VAQTINCHA O'CHIRILGAN.
-Subscription tekshiruvi o'chirildi — hamma xabar to'g'ridan-to'g'ri o'tadi.
+middlewares/subscription.py — Majburiy obuna tekshiruvi.
 """
 from __future__ import annotations
 
@@ -18,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 async def check_user_subscriptions(bot: Bot, user_id: int, chats: list) -> list:
+    """
+    Foydalanuvchi qaysi kanallarga a'zo emasligini qaytaradi.
+    Bot kanalda admin bo'lmasa yoki xato chiqsa — o'sha kanal o'tkazib yuboriladi.
+    """
     not_subscribed = []
     for chat in chats:
         try:
@@ -25,19 +28,23 @@ async def check_user_subscriptions(bot: Bot, user_id: int, chats: list) -> list:
             if member.status in ("left", "kicked", "banned"):
                 not_subscribed.append(chat)
         except TelegramForbiddenError:
-            logger.warning("Bot kanal %s da admin emas", chat.chat_id)
+            logger.warning(
+                "Bot kanal %s da admin emas — subscription tekshirilmadi, o'tkazildi",
+                chat.chat_id,
+            )
         except Exception as exc:
-            logger.warning("Kanal %s tekshirishda xato: %s", chat.chat_id, exc)
+            logger.warning("Kanal %s tekshirishda xato: %s — o'tkazildi", chat.chat_id, exc)
     return not_subscribed
 
 
 class SubscriptionMiddleware(BaseMiddleware):
     """
-    VAQTINCHA O'CHIRILGAN: Barcha xabarlar to'g'ridan-to'g'ri o'tadi.
-    Yoqish uchun: SUBSCRIPTION_ENABLED = True qiling.
+    Majburiy obuna tekshiruvi.
+    SUBSCRIPTION_ENABLED = True  →  yoqilgan
+    SUBSCRIPTION_ENABLED = False →  o'chirilgan (hammani o'tkazadi)
     """
 
-    SUBSCRIPTION_ENABLED = False  # <-- False = o'chirilgan
+    SUBSCRIPTION_ENABLED = True  # ✅ YOQILGAN
 
     async def __call__(
         self,
@@ -45,9 +52,11 @@ class SubscriptionMiddleware(BaseMiddleware):
         event: Message,
         data: dict[str, Any],
     ) -> Any:
+        # O'chirilgan bo'lsa hammani o'tkazamiz
         if not self.SUBSCRIPTION_ENABLED:
             return await handler(event, data)
 
+        # Faqat private chatlarda tekshiramiz
         if event.chat.type != "private":
             return await handler(event, data)
 
@@ -58,30 +67,36 @@ class SubscriptionMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         from config import settings
+
         user_id = event.from_user.id
 
+        # Admin har doim o'tadi
         if user_id in settings.ADMIN_IDS:
             return await handler(event, data)
 
+        # Til tanlanmagan → to'g'ridan-to'g'ri o'tadi (til tanlash oqimi ishlashi uchun)
         user = await get_user_by_id(session, user_id)
         if user is None or user.language is None:
             return await handler(event, data)
 
+        # Majburiy kanallar yo'q → o'tadi
         required_chats = await get_required_chats(session)
         if not required_chats:
             await update_user_activity(session, user_id)
             return await handler(event, data)
 
+        # A'zolikni tekshiramiz
         not_subscribed = await check_user_subscriptions(bot, user_id, required_chats)
         if not_subscribed:
             from keyboards.inline import kb_subscription
             from locales import t
+
             await event.answer(
                 t(user.language, "subscribe_required"),
-                reply_markup=kb_subscription(required_chats, user.language),
+                reply_markup=kb_subscription(not_subscribed, user.language),
                 parse_mode="HTML",
             )
-            return
+            return  # Handleriga yo'q bermaymiz
 
         await update_user_activity(session, user_id)
         return await handler(event, data)
