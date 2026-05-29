@@ -79,19 +79,25 @@ def kb_admin_manage_movies() -> InlineKeyboardMarkup:
 
 
 def kb_admin_manage_chats(chats: list[RequiredChat]) -> InlineKeyboardMarkup:
-    """Mavjud kanallar ro'yxati + Qo'shish tugmasi."""
+    """Mavjud kanallar ro'yxati + Monitoring + Qo'shish tugmalari."""
     builder = InlineKeyboardBuilder()
     for chat in chats:
         icon = "📢" if chat.chat_type == "channel" else "👥"
+        # A'zolar soni DB da saqlangan bo'lsa ko'rsatamiz
+        members = f" · {chat.member_count:,}" if chat.member_count >= 0 else ""
         builder.row(
             InlineKeyboardButton(
-                text=f"{icon} {chat.title}",
+                text=f"{icon} {chat.title}{members}",
                 callback_data=f"admin:chat_info:{chat.chat_id}",
             ),
             InlineKeyboardButton(
                 text="🗑",
                 callback_data=f"admin:del_chat:{chat.chat_id}",
             ),
+        )
+    if chats:
+        builder.row(
+            InlineKeyboardButton(text="📊 Monitoring", callback_data="admin:channel_monitoring")
         )
     builder.row(InlineKeyboardButton(text="➕ Qo'shish", callback_data="admin:add_chat"))
     builder.row(InlineKeyboardButton(text="◀️ Orqaga", callback_data="admin:back"))
