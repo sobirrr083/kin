@@ -12,7 +12,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from config import settings
+from config import debug_admin_ids_env, settings
 from database.engine import create_tables, dispose_engine
 from handlers import admin, ingestion, user
 from middlewares.database import DatabaseMiddleware
@@ -43,6 +43,9 @@ async def main() -> None:
     logger.info("═══════════════════════════════════════")
     logger.info("  KinoBot ishga tushmoqda...")
     logger.info("═══════════════════════════════════════")
+
+    # ENV o'zgaruvchisining XOM qiymatini ko'rsatadi → string bo'lib qolganini aniqlash uchun
+    debug_admin_ids_env()
 
     await create_tables()
 
