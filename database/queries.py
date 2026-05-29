@@ -1,10 +1,5 @@
 """
 database/queries.py — Barcha async DB operatsiyalari.
-
-BUG FIX #3: get_or_create_user da race condition tuzatildi.
-Avval: ikkita concurrent xabar kelganda ikkala coroutine ham "user yo'q" deb
-       INSERT qilardi → UNIQUE constraint failed → session buzilardi.
-Endi: try/except bilan handle qilinadi, rollback + re-select amalga oshiriladi.
 """
 from __future__ import annotations
 
@@ -45,12 +40,6 @@ async def get_or_create_user(
     username: Optional[str],
     full_name: Optional[str],
 ) -> tuple[User, bool]:
-    """
-    User mavjud bo'lsa qaytaradi, yo'q bo'lsa yaratadi. (user, created)
-
-    BUG FIX #3: Race condition — bir vaqtda 2 ta so'rov kelsa
-    UNIQUE constraint xatosi chiqmaslik uchun try/except ishlatiladi.
-    """
     try:
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalar_one_or_none()
@@ -69,12 +58,8 @@ async def get_or_create_user(
         return user, True
 
     except IntegrityError:
-        # Race condition: boshqa coroutine allaqachon qo'shgan
         await session.rollback()
-        logger.warning(
-            "get_or_create_user: UNIQUE conflict user_id=%s — re-select qilinmoqda",
-            user_id,
-        )
+        logger.warning("get_or_create_user: UNIQUE conflict user_id=%s — re-select", user_id)
         try:
             result = await session.execute(select(User).where(User.user_id == user_id))
             user = result.scalar_one()
@@ -107,7 +92,6 @@ async def set_user_language(session: AsyncSession, user_id: int, language: str) 
 
 
 async def update_user_activity(session: AsyncSession, user_id: int) -> None:
-    """Har xabar yuborilganda last_active va message_count ni yangilaydi."""
     try:
         await session.execute(
             update(User)
@@ -144,6 +128,18 @@ async def get_all_user_ids(session: AsyncSession) -> list[int]:
         return []
 
 
+async def get_active_user_ids(session: AsyncSession) -> list[int]:
+    """Broadcast uchun: faqat botni bloklamagan userlar."""
+    try:
+        result = await session.execute(
+            select(User.user_id).where(User.is_blocked == False)  # noqa: E712
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+        logger.error("get_active_user_ids xato: %s", exc)
+        return []
+
+
 async def count_users(session: AsyncSession) -> int:
     try:
         result = await session.execute(select(func.count()).select_from(User))
@@ -161,6 +157,18 @@ async def count_blocked_users(session: AsyncSession) -> int:
         return result.scalar_one()
     except Exception as exc:
         logger.error("count_blocked_users xato: %s", exc)
+        return 0
+
+
+async def count_active_non_blocked(session: AsyncSession) -> int:
+    """Botni bloklamagan userlar soni."""
+    try:
+        result = await session.execute(
+            select(func.count()).select_from(User).where(User.is_blocked == False)  # noqa: E712
+        )
+        return result.scalar_one()
+    except Exception as exc:
+        logger.error("count_active_non_blocked xato: %s", exc)
         return 0
 
 
@@ -194,6 +202,7 @@ async def get_full_stats(session: AsyncSession) -> dict:
     now = _now()
     return {
         "total_users": await count_users(session),
+        "active_users": await count_active_non_blocked(session),
         "blocked_users": await count_blocked_users(session),
         "daily_active": await count_active_users(session, now - timedelta(days=1)),
         "weekly_active": await count_active_users(session, now - timedelta(weeks=1)),
@@ -326,3 +335,24 @@ async def remove_required_chat(session: AsyncSession, chat_id: int) -> bool:
         logger.error("remove_required_chat xato chat_id=%s: %s", chat_id, exc)
         await session.rollback()
         return False
+
+
+async def update_chat_member_count(
+    session: AsyncSession,
+    chat_id: int,
+    member_count: int,
+) -> None:
+    """Kanal a'zolar sonini DB ga yozadi."""
+    try:
+        await session.execute(
+            update(RequiredChat)
+            .where(RequiredChat.chat_id == chat_id)
+            .values(
+                member_count=member_count,
+                member_count_updated_at=_now(),
+            )
+        )
+        await session.commit()
+    except Exception as exc:
+        logger.error("update_chat_member_count xato chat_id=%s: %s", chat_id, exc)
+        await session.rollback()
