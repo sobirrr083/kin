@@ -47,11 +47,17 @@ async def check_user_subscriptions(
     return not_subscribed
 
 
+from config import settings
+
+
 class SubscriptionMiddleware(BaseMiddleware):
     """
     Faqat private chat Message larini tekshiradi.
     CallbackQuery lar bu middleware dan o'tmaydi — ular
     alohida (check_sub callback) handler da boshqariladi.
+
+    BUG FIX: Admin userlar subscription tekshiruvidan o'tkazib yuboriladi,
+    aks holda /admin buyrug'i ishlamaydi.
     """
 
     async def __call__(
@@ -71,6 +77,11 @@ class SubscriptionMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         user_id = event.from_user.id
+
+        # BUG FIX: Admin bo'lsa subscription tekshirmasdan o'tkazib yuborish
+        if user_id in settings.ADMIN_IDS:
+            return await handler(event, data)
+
         user = await get_user_by_id(session, user_id)
 
         # User yo'q yoki tili tanlanmagan → language handler ishlaydi

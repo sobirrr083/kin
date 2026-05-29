@@ -36,6 +36,9 @@ async def get_or_create_user(
     full_name: Optional[str],
 ) -> tuple[User, bool]:
     """User mavjud bo'lsa qaytaradi, yo'q bo'lsa yaratadi. (user, created)"""
+    # BUG FIX: Race condition — avval SELECT, keyin INSERT qilsak,
+    # bir vaqtda 2 ta so'rov kelganda UNIQUE constraint xatosi chiqadi.
+    # Yechim: try/except bilan handle qilamiz.
     result = await session.execute(select(User).where(User.user_id == user_id))
     user = result.scalar_one_or_none()
     if user is not None:
@@ -45,11 +48,24 @@ async def get_or_create_user(
         user.is_blocked = False
         await session.commit()
         return user, False
-    user = User(user_id=user_id, username=username, full_name=full_name)
-    session.add(user)
-    await session.commit()
-    logger.info("Yangi user: user_id=%s username=%s", user_id, username)
-    return user, True
+
+    try:
+        user = User(user_id=user_id, username=username, full_name=full_name)
+        session.add(user)
+        await session.flush()  # commit dan oldin ID ni olish
+        await session.commit()
+        logger.info("Yangi user: user_id=%s username=%s", user_id, username)
+        return user, True
+    except Exception:
+        # Race condition: boshqa coroutine allaqachon qo'shgan
+        await session.rollback()
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one()
+        user.username = username
+        user.full_name = full_name
+        user.is_blocked = False
+        await session.commit()
+        return user, False
 
 
 async def set_user_language(

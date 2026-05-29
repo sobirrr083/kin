@@ -69,6 +69,13 @@ async def main() -> None:
         settings.STORAGE_GROUP_ID,
         settings.DATABASE_URL.split("://")[0],
     )
+    # BUG FIX: ADMIN_IDS bo'sh bo'lsa ogohlantirish
+    if not settings.ADMIN_IDS:
+        logger.warning(
+            "⚠️  DIQQAT: ADMIN_IDS bo'sh! "
+            "Railway → Variables → ADMIN_IDS ga o'z Telegram ID ingizni kiriting. "
+            "ID ni bilish uchun @userinfobot ga /start yuboring."
+        )
     logger.info("Bot polling rejimida ishlamoqda. To'xtatish: Ctrl+C")
 
     try:
