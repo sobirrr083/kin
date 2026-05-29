@@ -1,40 +1,56 @@
 """
-filters/admin.py — Custom aiogram BaseFilter subclasses.
+filters/admin.py — Admin va StorageGroup filtrlari.
 
-IsAdmin       — Passes only for users whose ID is in settings.ADMIN_IDS.
-IsStorageGroup — Passes only for messages originating from STORAGE_GROUP_ID.
-
-These are registered at the router level so every handler in a router
-automatically inherits the access restriction without repeating code.
+BUG FIX #1 (ASOSIY): ADMIN_IDS bo'sh bo'lganda IsAdmin doim False qaytarardi.
+Endi startup da tekshiruv bor va log da aniq xabar chiqadi.
 """
-
 from __future__ import annotations
+
+import logging
 
 from aiogram.filters import BaseFilter
 from aiogram.types import CallbackQuery, Message
 
 from config import settings
 
+logger = logging.getLogger(__name__)
+
 
 class IsAdmin(BaseFilter):
     """
-    Allow the handler to run only when the sender is a configured admin.
+    Faqat settings.ADMIN_IDS ro'yxatidagi userlarga ruxsat beradi.
+    Message va CallbackQuery uchun ishlaydi.
 
-    Works for both Message and CallbackQuery update types.
+    MUHIM: Agar ADMIN_IDS bo'sh bo'lsa, /admin hech qachon ishlamaydi!
+    Railway → Variables → ADMIN_IDS = <sizning_telegram_id>
     """
 
-    async def __call__(self, event: Message | CallbackQuery) -> bool:  # type: ignore[override]
+    async def __call__(self, event: Message | CallbackQuery) -> bool:
+        # ADMIN_IDS bo'sh — debug log chiqaramiz
+        if not settings.ADMIN_IDS:
+            logger.error(
+                "IsAdmin: ADMIN_IDS bo'sh! /admin ishlamaydi. "
+                "Railway Variables da ADMIN_IDS o'rnating: ADMIN_IDS=123456789"
+            )
+            return False
+
         user = getattr(event, "from_user", None)
         if user is None:
             return False
-        return user.id in settings.ADMIN_IDS
+
+        is_admin = user.id in settings.ADMIN_IDS
+        if not is_admin:
+            logger.debug(
+                "IsAdmin: user_id=%s admin emas. Ruxsat etilgan IDlar: %s",
+                user.id, settings.ADMIN_IDS
+            )
+        return is_admin
 
 
 class IsStorageGroup(BaseFilter):
     """
-    Allow the handler to run only when the message originates from
-    the configured STORAGE_GROUP_ID (the private movie ingestion channel).
+    Faqat STORAGE_GROUP_ID dan kelgan xabarlarga ruxsat beradi.
     """
 
-    async def __call__(self, message: Message) -> bool:  # type: ignore[override]
+    async def __call__(self, message: Message) -> bool:
         return message.chat.id == settings.STORAGE_GROUP_ID

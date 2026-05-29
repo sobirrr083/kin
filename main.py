@@ -1,9 +1,5 @@
 """
 main.py — KinoBot ishga tushirish nuqtasi.
-
-Middleware tartibi (MUHIM):
-  1. DatabaseMiddleware  — session ni inject qiladi
-  2. SubscriptionMiddleware — session dan foydalanadi (message uchun)
 """
 from __future__ import annotations
 
@@ -35,18 +31,11 @@ logger = logging.getLogger(__name__)
 
 def _build_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
-
-    # 1. DatabaseMiddleware — barcha updatelar uchun
     dp.update.middleware(DatabaseMiddleware())
-
-    # 2. SubscriptionMiddleware — faqat Message lar uchun
     dp.message.middleware(SubscriptionMiddleware())
-
-    # Router tartibi: ingestion → admin → user
     dp.include_router(ingestion.router)
     dp.include_router(admin.router)
     dp.include_router(user.router)
-
     return dp
 
 
@@ -64,19 +53,31 @@ async def main() -> None:
     dp = _build_dispatcher()
 
     logger.info(
-        "Admin: %s | StorageGroup: %s | DB: %s",
+        "Admin: %s | StorageGroup: %s | DB: %s | Subscription: %s",
         settings.ADMIN_IDS,
         settings.STORAGE_GROUP_ID,
         settings.DATABASE_URL.split("://")[0],
+        "YOQILGAN" if SubscriptionMiddleware.SUBSCRIPTION_ENABLED else "O'CHIRILGAN",
     )
-    # BUG FIX: ADMIN_IDS bo'sh bo'lsa ogohlantirish
+
     if not settings.ADMIN_IDS:
-        logger.warning(
-            "⚠️  DIQQAT: ADMIN_IDS bo'sh! "
-            "Railway → Variables → ADMIN_IDS ga o'z Telegram ID ingizni kiriting. "
-            "ID ni bilish uchun @userinfobot ga /start yuboring."
+        logger.error(
+            "\n"
+            "══════════════════════════════════════════\n"
+            " XATO: ADMIN_IDS BO'SH!\n"
+            " /admin ISHLAMAYDI!\n"
+            "\n"
+            " Yechim — Railway > Variables > Add:\n"
+            "   Name:  ADMIN_IDS\n"
+            "   Value: 123456789   ← o'z ID ingiz\n"
+            "\n"
+            " ID ni bilish: @userinfobot > /start\n"
+            "══════════════════════════════════════════"
         )
-    logger.info("Bot polling rejimida ishlamoqda. To'xtatish: Ctrl+C")
+    else:
+        logger.info("✅ Admin tayyor. ADMIN_IDS: %s", settings.ADMIN_IDS)
+
+    logger.info("Bot polling rejimida ishlamoqda.")
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

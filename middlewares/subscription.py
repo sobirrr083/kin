@@ -1,11 +1,6 @@
 """
-middlewares/subscription.py — Majburiy a'zolik tekshiruvi.
-
-Har bir private chat xabarida:
-  1. User DB da yo'q yoki tili yo'q → o'tkazib yuboradi (language handler ishlaydi)
-  2. Majburiy kanallar yo'q → o'tkazib yuboradi
-  3. User barcha kanallarga a'zo → faoliyatni yangilaydi, davom etadi
-  4. A'zo emas → a'zolik xabarini yuboradi va to'xtatadi
+middlewares/subscription.py — VAQTINCHA O'CHIRILGAN.
+Subscription tekshiruvi o'chirildi — hamma xabar to'g'ridan-to'g'ri o'tadi.
 """
 from __future__ import annotations
 
@@ -17,22 +12,12 @@ from aiogram.exceptions import TelegramForbiddenError
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.queries import (
-    get_required_chats,
-    get_user_by_id,
-    update_user_activity,
-)
+from database.queries import get_required_chats, get_user_by_id, update_user_activity
 
 logger = logging.getLogger(__name__)
 
 
-async def check_user_subscriptions(
-    bot: Bot, user_id: int, chats: list
-) -> list:
-    """
-    Userning qaysi kanallarga a'zo emasligini qaytaradi.
-    Tekshirib bo'lmaydigan kanal (bot admin emas) o'tkazib yuboriladi.
-    """
+async def check_user_subscriptions(bot: Bot, user_id: int, chats: list) -> list:
     not_subscribed = []
     for chat in chats:
         try:
@@ -40,25 +25,19 @@ async def check_user_subscriptions(
             if member.status in ("left", "kicked", "banned"):
                 not_subscribed.append(chat)
         except TelegramForbiddenError:
-            # Bot kanalda admin emas — tekshira olmaydi, o'tkazib yuboramiz
-            logger.warning("Bot kanal %s da a'zolikni tekshira olmadi", chat.chat_id)
+            logger.warning("Bot kanal %s da admin emas", chat.chat_id)
         except Exception as exc:
             logger.warning("Kanal %s tekshirishda xato: %s", chat.chat_id, exc)
     return not_subscribed
 
 
-from config import settings
-
-
 class SubscriptionMiddleware(BaseMiddleware):
     """
-    Faqat private chat Message larini tekshiradi.
-    CallbackQuery lar bu middleware dan o'tmaydi — ular
-    alohida (check_sub callback) handler da boshqariladi.
-
-    BUG FIX: Admin userlar subscription tekshiruvidan o'tkazib yuboriladi,
-    aks holda /admin buyrug'i ishlamaydi.
+    VAQTINCHA O'CHIRILGAN: Barcha xabarlar to'g'ridan-to'g'ri o'tadi.
+    Yoqish uchun: SUBSCRIPTION_ENABLED = True qiling.
     """
+
+    SUBSCRIPTION_ENABLED = False  # <-- False = o'chirilgan
 
     async def __call__(
         self,
@@ -66,7 +45,9 @@ class SubscriptionMiddleware(BaseMiddleware):
         event: Message,
         data: dict[str, Any],
     ) -> Any:
-        # Faqat private chat
+        if not self.SUBSCRIPTION_ENABLED:
+            return await handler(event, data)
+
         if event.chat.type != "private":
             return await handler(event, data)
 
@@ -76,40 +57,31 @@ class SubscriptionMiddleware(BaseMiddleware):
         if not session or not bot or not event.from_user:
             return await handler(event, data)
 
+        from config import settings
         user_id = event.from_user.id
 
-        # BUG FIX: Admin bo'lsa subscription tekshirmasdan o'tkazib yuborish
         if user_id in settings.ADMIN_IDS:
             return await handler(event, data)
 
         user = await get_user_by_id(session, user_id)
-
-        # User yo'q yoki tili tanlanmagan → language handler ishlaydi
         if user is None or user.language is None:
             return await handler(event, data)
 
-        # Majburiy kanallar ro'yxati
         required_chats = await get_required_chats(session)
         if not required_chats:
             await update_user_activity(session, user_id)
             return await handler(event, data)
 
-        # A'zolikni tekshirish
         not_subscribed = await check_user_subscriptions(bot, user_id, required_chats)
-
         if not_subscribed:
-            # A'zo emas → subscription xabarini yuborish
             from keyboards.inline import kb_subscription
             from locales import t
-
-            lang = user.language
             await event.answer(
-                t(lang, "subscribe_required"),
-                reply_markup=kb_subscription(required_chats, lang),
+                t(user.language, "subscribe_required"),
+                reply_markup=kb_subscription(required_chats, user.language),
                 parse_mode="HTML",
             )
-            return  # Handleri chaqirmaymiz
+            return
 
-        # Hammasi yaxshi — faoliyatni yangilash
         await update_user_activity(session, user_id)
         return await handler(event, data)
