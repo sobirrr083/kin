@@ -5,6 +5,7 @@ Jadvallar:
   movies         — Telegram file_id ni kod bilan saqlaydi
   users          — Bot ishlatgan barcha userlar (statistika uchun)
   required_chats — Majburiy a'zolik kerak bo'lgan kanal/guruhlar
+                   + member_count (bot tomonidan so'ngi tekshiruv)
 """
 from __future__ import annotations
 
@@ -75,9 +76,17 @@ class RequiredChat(Base):
     # 'channel' yoki 'group'
     chat_type: Mapped[str] = mapped_column(String(20), nullable=False, default="channel")
 
+    # Bot so'ngi tekshiruvdagi a'zolar soni (-1 = hali tekshirilmagan)
+    member_count: Mapped[int] = mapped_column(Integer, default=-1, nullable=False)
+
+    # member_count so'ngi yangilangan vaqti
+    member_count_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     def __repr__(self) -> str:
-        return f"<RequiredChat id={self.chat_id} title={self.title!r}>"
+        return f"<RequiredChat id={self.chat_id} title={self.title!r} members={self.member_count}>"
