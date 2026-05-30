@@ -75,7 +75,7 @@ async def main() -> None:
         settings.ADMIN_IDS,
         settings.STORAGE_GROUP_ID,
         settings.DATABASE_URL.split("://")[0],
-        "YOQILGAN" if SubscriptionMiddleware.SUBSCRIPTION_ENABLED else "O'CHIRILGAN",
+        "YOQILGAN (DB orqali boshqariladi)",
     )
 
     if not settings.ADMIN_IDS:
