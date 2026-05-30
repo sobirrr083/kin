@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -246,11 +246,15 @@ async def cb_check_subscription(
 # Kino kodi — oddiy xabar orqali
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.message(F.text.regexp(r"^[A-Za-z0-9]+$"))
+@router.message(StateFilter(None), F.text.regexp(r"^[A-Za-z0-9]+$"))
 async def handle_movie_code(message: Message, session: AsyncSession, bot: Bot) -> None:
     """
     Alphanumeric xabar → kino kodi sifatida qabul qilinadi.
-    Subscription middleware bu handlerga yetib kelishidan oldin tekshiradi.
+
+    StateFilter(None) — faqat hech qanday aktiv FSM holati bo'lmagan vaqtda ishlaydi.
+    Agar admin waiting_add_chat, waiting_add_admin yoki boshqa holatda bo'lsa —
+    bu handler UMUMAN CHAQIRILMAYDI. Shu tarzda kanal IDlari kino kodi
+    sifatida qabul qilinishi 100% oldini olinadi.
     """
     db_user = await get_user_by_id(session, message.from_user.id)
     lang = db_user.language if db_user else "uz"

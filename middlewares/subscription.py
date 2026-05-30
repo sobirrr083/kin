@@ -67,11 +67,12 @@ class SubscriptionMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         from config import settings
+        from filters.admin import get_all_admin_ids
 
         user_id = event.from_user.id
 
-        # Admin har doim o'tadi
-        if user_id in settings.ADMIN_IDS:
+        # Admin har doim o'tadi (statik + dinamik adminlar)
+        if user_id in get_all_admin_ids():
             return await handler(event, data)
 
         # Til tanlanmagan → to'g'ridan-to'g'ri o'tadi (til tanlash oqimi ishlashi uchun)
