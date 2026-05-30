@@ -676,8 +676,8 @@ async def cb_add_chat(callback: CallbackQuery, state: FSMContext) -> None:
             "Kanal yoki guruhning <b>ID</b> sini yuboring.\n\n"
             "📌 <b>Misol:</b>\n"
             "  • <code>-1001234567890</code>\n"
-            "  • <code>1001234567890</code>  <i>(- belgisiz ham bo'ladi)</i>\n\n"
-            "⚠️ <i>Bot kanalga admin sifatida qo'shilgan bo'lishi shart!</i>\n\n"
+            "  • <code>1001234567890</code>  <i>(minus belgisiz ham qabul qilinadi)</i>\n\n"
+            "⚠️ <i>Bot kanalga <b>admin</b> sifatida qo'shilgan bo'lishi shart!</i>\n\n"
             "<i>Bekor qilish: /cancel</i>",
             reply_markup=kb_cancel(),
             parse_mode="HTML",
@@ -689,55 +689,222 @@ async def cb_add_chat(callback: CallbackQuery, state: FSMContext) -> None:
         await _safe_answer(callback)
 
 
+def _normalize_chat_id(raw: str) -> tuple[int | None, str]:
+    """
+    Foydalanuvchi yuborgan ID ni to'g'ri int ga o'tkazadi.
+
+    Qoidalar:
+      • "-1002593952555"  → -1002593952555  (as-is)
+      • "1002593952555"   → -1002593952555  (100... bilan boshlansa -100... qilinadi)
+      • "123456789"       → 123456789       (kichik musbat — oddiy guruh)
+      • "-123456789"      → -123456789      (as-is)
+      • "abc"             → None, format_error
+
+    Qaytaradi: (chat_id, error_reason | "ok")
+    """
+    clean = raw.lstrip("-")
+    if not clean or not clean.isdigit():
+        return None, "format_error"
+
+    num = int(clean)
+
+    if raw.startswith("-"):
+        # Foydalanuvchi o'zi minus bilan yozgan — as-is
+        return int(raw), "ok"
+
+    # Minus belgisisiz yozilgan
+    # Telegram super-group/channel IDlari 100XXXXXXXXXX formatida bo'ladi
+    raw_str = str(num)
+    if raw_str.startswith("100") and len(raw_str) >= 10:
+        # Super-group yoki kanal → -100XXXXXXXXXX
+        return -num, "ok"
+
+    # Oddiy musbat ID (eski guruh yoki test) — as-is
+    return num, "ok"
+
+
+async def _check_bot_in_chat(bot: Bot, chat_id: int) -> tuple[bool, bool, str]:
+    """
+    Botning kanalda mavjudligi va admin huquqini tekshiradi.
+
+    Qaytaradi: (is_member, is_admin, status_text)
+      is_member — bot kanalda bor
+      is_admin  — bot admin huquqiga ega
+      status_text — holat matni (log uchun)
+    """
+    try:
+        member = await bot.get_chat_member(chat_id, (await bot.get_me()).id)
+        status = member.status  # "administrator", "member", "kicked", "left", "creator"
+
+        if status in ("administrator", "creator"):
+            return True, True, status
+        elif status == "member":
+            return True, False, status
+        elif status in ("kicked", "restricted"):
+            return False, False, status
+        else:
+            # "left" — bot chiqib ketgan yoki hech qachon bo'lmagan
+            return False, False, status
+    except TelegramForbiddenError:
+        # Bot butunlay bloklangan yoki kanal private va bot yo'q
+        return False, False, "forbidden"
+    except Exception as exc:
+        logger.warning("_check_bot_in_chat xato chat_id=%s: %s", chat_id, exc)
+        return False, False, f"unknown_error: {exc}"
+
+
 @router.message(AdminStates.waiting_add_chat)
 async def process_add_chat(message: Message, session: AsyncSession, state: FSMContext, bot: Bot) -> None:
     """
-    Faqat ID orqali kanal/guruh qo'shadi.
-    - yoki - belgilarni hisobga oladi.
+    Kanal/guruh ID qabul qilib, barcha holatlarni to'g'ri tekshiradi:
+      1. ID format tekshiruvi
+      2. Telegram dan chat ma'lumotlari olish (get_chat)
+      3. Botning kanal/guruhda mavjudligi va admin huquqi tekshiruvi
+      4. Invite link olish
+      5. A'zolar sonini olish
+      6. DB ga saqlash
+    Har bir bosqichda aniq xato xabari beriladi.
     """
     await state.clear()
 
     raw = (message.text or "").strip()
 
-    # Faqat raqam (yoki -raqam) bo'lishi kerak
-    clean = raw.lstrip("-")
-    if not clean.isdigit():
+    # ── 1. Format tekshiruvi ─────────────────────────────────────────────────
+    chat_id_int, parse_err = _normalize_chat_id(raw)
+    if chat_id_int is None:
         await message.answer(
             "❌ <b>Noto'g'ri format.</b>\n\n"
-            "Faqat kanal/guruh <b>ID</b> sini yuboring.\n"
-            "📌 Misol: <code>-1001234567890</code> yoki <code>1001234567890</code>",
+            "Faqat raqamdan iborat kanal/guruh ID si yuboring.\n\n"
+            "📌 <b>To'g'ri misollar:</b>\n"
+            "  • <code>-1001234567890</code>\n"
+            "  • <code>1001234567890</code>\n\n"
+            "❓ ID ni qanday topish: kanaldan ixtiyoriy xabarni\n"
+            "   botga forward qiling — ID ko'rinadi.",
             reply_markup=kb_admin_back(),
             parse_mode="HTML",
         )
+        logger.warning("process_add_chat: format xato — raw=%r admin=%s", raw, message.from_user.id)
         return
 
-    # - belgisi bo'lmasa qo'shamiz (kanallar manfiy ID bo'ladi)
-    if not raw.startswith("-"):
-        chat_id_int = -int(clean)
-    else:
-        chat_id_int = int(raw)
+    logger.info("process_add_chat: ID=%s (xom: %r) admin=%s", chat_id_int, raw, message.from_user.id)
 
+    # ── 2. Telegram dan chat ma'lumotlari olish ──────────────────────────────
     try:
         chat = await bot.get_chat(chat_id_int)
-    except Exception as exc:
+    except TelegramForbiddenError as exc:
+        # Bot private kanalda yo'q yoki bloklangan
+        await message.answer(
+            f"🚫 <b>Kanal/guruhga kirish taqiqlangan.</b>\n\n"
+            f"🆔 ID: <code>{chat_id_int}</code>\n\n"
+            f"<b>Sabab:</b> Bot bu kanal/guruhda yo'q yoki bloklangan.\n\n"
+            f"✅ <b>Yechim:</b>\n"
+            f"  1. Botni kanalga qo'shing\n"
+            f"  2. Botga <b>admin huquqi</b> bering\n"
+            f"  3. Qayta urinib ko'ring\n\n"
+            f"🔧 Texnik: <code>{exc}</code>",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        logger.warning("process_add_chat: ForbiddenError — chat_id=%s exc=%s", chat_id_int, exc)
+        return
+    except TelegramBadRequest as exc:
+        exc_str = str(exc).lower()
+        if "chat not found" in exc_str or "invalid" in exc_str:
+            tip = (
+                "ID noto'g'ri yoki kanal/guruh o'chirilgan.\n"
+                "Super-group IDlari odatda <code>-100XXXXXXXXXX</code> formatida bo'ladi."
+            )
+        else:
+            tip = f"Telegram xatosi: <code>{exc}</code>"
         await message.answer(
             f"❌ <b>Kanal/guruh topilmadi.</b>\n\n"
-            f"  • Bot kanalga <b>admin</b> sifatida qo'shilganmi?\n"
-            f"  • ID to'g'rimi? <code>{chat_id_int}</code>\n\n"
-            f"Xato: <code>{exc}</code>",
+            f"🆔 Tekshirilgan ID: <code>{chat_id_int}</code>\n\n"
+            f"📋 <b>Sabab:</b> {tip}\n\n"
+            f"✅ <b>Yechim:</b>\n"
+            f"  • ID ni qayta tekshiring\n"
+            f"  • Kanal/guruhdan xabar forward qiling — ID olish uchun",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        logger.warning("process_add_chat: BadRequest — chat_id=%s exc=%s", chat_id_int, exc)
+        return
+    except Exception as exc:
+        await message.answer(
+            f"❌ <b>Kutilmagan xatolik.</b>\n\n"
+            f"🆔 ID: <code>{chat_id_int}</code>\n"
+            f"🔧 Xato: <code>{exc}</code>\n\n"
+            f"Administrator log fayllarni tekshiring.",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        logger.error("process_add_chat: get_chat kutilmagan xato — chat_id=%s exc=%s", chat_id_int, exc)
+        return
+
+    # ── 3. Bot membership va admin huquqi tekshiruvi ─────────────────────────
+    is_member, is_admin, bot_status = await _check_bot_in_chat(bot, chat.id)
+    logger.info(
+        "process_add_chat: bot_status=%s is_member=%s is_admin=%s chat_id=%s",
+        bot_status, is_member, is_admin, chat.id,
+    )
+
+    if not is_member:
+        await message.answer(
+            f"⚠️ <b>Bot bu kanal/guruhda mavjud emas!</b>\n\n"
+            f"📛 <b>Nomi:</b> {chat.title}\n"
+            f"🆔 <b>ID:</b> <code>{chat.id}</code>\n"
+            f"📊 <b>Bot holati:</b> <code>{bot_status}</code>\n\n"
+            f"✅ <b>Nima qilish kerak:</b>\n"
+            f"  1. Botni shu kanal/guruhga qo'shing\n"
+            f"  2. Botga <b>Admin</b> huquqi bering\n"
+            f"  3. Qayta /cancel → Kanallar → Qo'shish\n\n"
+            f"<i>Bot admin bo'lmasa majburiy obuna ishlamaydi!</i>",
             reply_markup=kb_admin_back(),
             parse_mode="HTML",
         )
         return
 
+    if not is_admin:
+        # Bot member lekin admin emas — ogohlantirish bilan baribir qo'shish imkonini berish
+        # Lekin foydalanuvchini ogohlantirish kerak
+        warn_text = (
+            f"⚠️ <b>Diqqat: Bot admin emas!</b>\n\n"
+            f"📛 <b>Nomi:</b> {chat.title}\n"
+            f"🆔 <b>ID:</b> <code>{chat.id}</code>\n"
+            f"📊 <b>Bot holati:</b> <code>{bot_status}</code>\n\n"
+            f"Bot <b>oddiy a'zo</b> sifatida qo'shilgan.\n"
+            "Admin bo'lmasa:\n"
+            "  • Invite link yaratib bo'lmaydi\n"
+            f"  • Obuna tekshiruvi ishlamasligi mumkin\n\n"
+            f"Botga <b>Admin</b> huquqi bering, so'ng qayta qo'shing.\n\n"
+            f"Baribir qo'shishni xohlaysizmi? Kanalga admin bering va /cancel → qayta urinib ko'ring."
+        )
+        await message.answer(warn_text, reply_markup=kb_admin_back(), parse_mode="HTML")
+        logger.warning(
+            "process_add_chat: bot member lekin admin emas — chat_id=%s status=%s",
+            chat.id, bot_status,
+        )
+        return
+
+    # ── 4. Invite link olish ─────────────────────────────────────────────────
     invite_link = getattr(chat, "invite_link", None)
+    invite_link_status = "mavjud"
+
     if not invite_link:
         try:
             invite_link = await bot.export_chat_invite_link(chat.id)
-        except Exception:
-            pass
+            invite_link_status = "yaratildi"
+        except TelegramForbiddenError:
+            invite_link_status = "❌ ruxsat yo'q (admin huquqi yetarli emas)"
+            logger.warning("process_add_chat: invite_link yaratib bo'lmadi — chat_id=%s", chat.id)
+        except Exception as exc:
+            invite_link_status = f"❌ xato: {exc}"
+            logger.warning("process_add_chat: invite_link xato — chat_id=%s exc=%s", chat.id, exc)
 
+    # ── 5. A'zolar sonini olish ───────────────────────────────────────────────
     member_count = await _fetch_member_count(bot, chat.id)
+    members_str = f"<b>{member_count:,}</b> ta" if member_count >= 0 else "⚠️ aniqlanmadi"
+
+    # ── 6. DB ga saqlash ─────────────────────────────────────────────────────
     chat_type = "channel" if chat.type == "channel" else "group"
     username = getattr(chat, "username", None)
 
@@ -752,29 +919,40 @@ async def process_add_chat(message: Message, session: AsyncSession, state: FSMCo
         )
         if member_count >= 0:
             await update_chat_member_count(session, chat.id, member_count)
-
-        icon = "📢" if chat_type == "channel" else "👥"
-        action = "qo'shildi ✅" if created else "yangilandi 🔄"
-        members_str = f"<b>{member_count:,}</b> ta" if member_count >= 0 else "aniqlanmadi"
-
+    except Exception as exc:
+        logger.error("process_add_chat: DB saqlash xato — chat_id=%s exc=%s", chat.id, exc)
         await message.answer(
-            f"{icon} <b>Kanal {action}</b>\n\n"
-            f"📛 <b>Nomi:</b> {chat.title}\n"
-            f"🆔 <b>ID:</b> <code>{chat.id}</code>\n"
-            f"👤 <b>Username:</b> {'@' + username if username else '—'}\n"
-            f"👥 <b>A'zolar:</b> {members_str}\n"
-            f"🔗 <b>Havola:</b> {'✅ Bor' if invite_link else '⚠️ Yoq'}",
+            f"❌ <b>Bazaga saqlashda xatolik!</b>\n\n"
+            f"📛 Nomi: {chat.title}\n"
+            f"🆔 ID: <code>{chat.id}</code>\n"
+            f"🔧 Xato: <code>{exc}</code>",
             reply_markup=kb_admin_back(),
             parse_mode="HTML",
         )
-        logger.info(
-            "Kanal %s: id=%s title=%s members=%s admin=%s",
-            "qo'shildi" if created else "yangilandi",
-            chat.id, chat.title, member_count, message.from_user.id,
-        )
-    except Exception as exc:
-        logger.error("process_add_chat DB xato: %s", exc)
-        await message.answer("❌ Kanalni saqlashda xato yuz berdi.", reply_markup=kb_admin_back())
+        return
+
+    # ── 7. Muvaffaqiyat xabari ────────────────────────────────────────────────
+    icon = "📢" if chat_type == "channel" else "👥"
+    action = "qo'shildi ✅" if created else "yangilandi 🔄"
+
+    await message.answer(
+        f"{icon} <b>Kanal {action}</b>\n\n"
+        f"📛 <b>Nomi:</b> {chat.title}\n"
+        f"🆔 <b>ID:</b> <code>{chat.id}</code>\n"
+        f"👤 <b>Username:</b> {'@' + username if username else '—'}\n"
+        f"📊 <b>Tur:</b> {chat_type}\n"
+        f"👥 <b>A'zolar:</b> {members_str}\n"
+        f"🔗 <b>Invite link:</b> {'✅ ' + invite_link_status if invite_link else '⚠️ ' + invite_link_status}\n"
+        f"🤖 <b>Bot holati:</b> ✅ Admin",
+        reply_markup=kb_admin_back(),
+        parse_mode="HTML",
+    )
+    logger.info(
+        "Kanal %s: id=%s title=%r type=%s members=%s invite=%s admin=%s",
+        "qo'shildi" if created else "yangilandi",
+        chat.id, chat.title, chat_type, member_count,
+        bool(invite_link), message.from_user.id,
+    )
 
 
 @router.callback_query(F.data.startswith("admin:del_chat:"))

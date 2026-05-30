@@ -43,12 +43,10 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "movie_caption": (
             "🎬 <b>{title}</b>\n\n"
-            "📌 <b>Kod:</b> <code>{code}</code>\n\n"
-            "<i>Kinoni zavq bilan tomosha qiling! 🍿</i>"
+            "📌 <b>Kod:</b> <code>{code}</code>"
         ),
         "movie_caption_no_title": (
-            "📌 <b>Kod:</b> <code>{code}</code>\n\n"
-            "<i>Kinoni zavq bilan tomosha qiling! 🍿</i>"
+            "📌 <b>Kod:</b> <code>{code}</code>"
         ),
         "movie_send_error": (
             "⚠️ <b>Filmni yuborishda xatolik.</b>\n\n"
