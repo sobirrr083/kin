@@ -64,6 +64,10 @@ def kb_admin_main() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🎬 Kinolar", callback_data="admin:manage_movies"),
         InlineKeyboardButton(text="📡 Kanallar", callback_data="admin:manage_chats"),
     )
+    builder.row(
+        InlineKeyboardButton(text="📝 Qo'shimcha Matn", callback_data="admin:manage_extra"),
+        InlineKeyboardButton(text="🔢 Kod Sanagichi", callback_data="admin:code_counter"),
+    )
     builder.row(InlineKeyboardButton(text="❌ Yopish", callback_data="admin:close"))
     return builder.as_markup()
 
@@ -113,4 +117,13 @@ def kb_admin_back() -> InlineKeyboardMarkup:
 def kb_cancel() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin:cancel"))
+    return builder.as_markup()
+
+
+def kb_admin_extra_caption() -> InlineKeyboardMarkup:
+    """Extra caption boshqaruv tugmalari."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="➕ Qo'shish / Tahrirlash", callback_data="admin:set_extra"))
+    builder.row(InlineKeyboardButton(text="🗑 O'chirish", callback_data="admin:clear_extra"))
+    builder.row(InlineKeyboardButton(text="◀️ Orqaga", callback_data="admin:back"))
     return builder.as_markup()

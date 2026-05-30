@@ -11,13 +11,88 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Movie, RequiredChat, User
+from database.models import BotSettings, Movie, RequiredChat, User
 
 logger = logging.getLogger(__name__)
+
+_START_CODE = 1111  # Kod sanagichi boshlang'ich qiymati
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BotSettings — kino kodi sanagichi
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _get_or_init_settings(session: AsyncSession) -> BotSettings:
+    """
+    bot_settings jadvalida yagona qator oladi yoki yaratadi (id=1).
+    """
+    result = await session.execute(select(BotSettings).where(BotSettings.id == 1))
+    settings = result.scalar_one_or_none()
+    if settings is None:
+        settings = BotSettings(id=1, next_code=_START_CODE)
+        session.add(settings)
+        await session.flush()
+    return settings
+
+
+async def get_next_code(session: AsyncSession) -> int:
+    """
+    Hozirgi next_code ni qaytaradi (DB ga yozmaydi).
+    Admin panelda ko'rsatish uchun.
+    """
+    try:
+        s = await _get_or_init_settings(session)
+        await session.commit()
+        return s.next_code
+    except Exception as exc:
+        logger.error("get_next_code xato: %s", exc)
+        await session.rollback()
+        return _START_CODE
+
+
+async def consume_next_code(session: AsyncSession) -> int:
+    """
+    Joriy kodni qaytaradi va counter ni +1 qiladi.
+    Yangi kino qo'shilganda chaqiriladi.
+    """
+    try:
+        s = await _get_or_init_settings(session)
+        code = s.next_code
+        s.next_code = code + 1
+        s.updated_at = _now()
+        await session.commit()
+        logger.info("Kod berildi: %s → keyingisi: %s", code, s.next_code)
+        return code
+    except Exception as exc:
+        logger.error("consume_next_code xato: %s", exc)
+        await session.rollback()
+        raise
+
+
+async def set_next_code(session: AsyncSession, new_code: int) -> bool:
+    """
+    Admin tomonidan next_code ni o'zgartirish.
+    new_code >= 1 bo'lishi kerak.
+    True — muvaffaqiyatli, False — xato.
+    """
+    if new_code < 1:
+        return False
+    try:
+        s = await _get_or_init_settings(session)
+        old = s.next_code
+        s.next_code = new_code
+        s.updated_at = _now()
+        await session.commit()
+        logger.info("next_code o'zgartirildi: %s → %s", old, new_code)
+        return True
+    except Exception as exc:
+        logger.error("set_next_code xato: %s", exc)
+        await session.rollback()
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -29,7 +104,7 @@ async def get_user_by_id(session: AsyncSession, user_id: int) -> Optional[User]:
         result = await session.execute(select(User).where(User.user_id == user_id))
         return result.scalar_one_or_none()
     except Exception as exc:
-        logger.error("get_user_by_id xato user_id=%s: %s", user_id, exc)
+        logger.error("get_user_by_id xato: %s", exc)
         return None
 
 
@@ -49,17 +124,14 @@ async def get_or_create_user(
             user.is_blocked = False
             await session.commit()
             return user, False
-
         user = User(user_id=user_id, username=username, full_name=full_name)
         session.add(user)
         await session.flush()
         await session.commit()
         logger.info("Yangi user: user_id=%s username=%s", user_id, username)
         return user, True
-
     except IntegrityError:
         await session.rollback()
-        logger.warning("get_or_create_user: UNIQUE conflict user_id=%s — re-select", user_id)
         try:
             result = await session.execute(select(User).where(User.user_id == user_id))
             user = result.scalar_one()
@@ -69,24 +141,21 @@ async def get_or_create_user(
             await session.commit()
             return user, False
         except Exception as exc2:
-            logger.error("get_or_create_user re-select xato user_id=%s: %s", user_id, exc2)
+            logger.error("get_or_create_user re-select xato: %s", exc2)
             await session.rollback()
             raise
-
     except Exception as exc:
-        logger.error("get_or_create_user xato user_id=%s: %s", user_id, exc)
+        logger.error("get_or_create_user xato: %s", exc)
         await session.rollback()
         raise
 
 
 async def set_user_language(session: AsyncSession, user_id: int, language: str) -> None:
     try:
-        await session.execute(
-            update(User).where(User.user_id == user_id).values(language=language)
-        )
+        await session.execute(update(User).where(User.user_id == user_id).values(language=language))
         await session.commit()
     except Exception as exc:
-        logger.error("set_user_language xato user_id=%s lang=%s: %s", user_id, language, exc)
+        logger.error("set_user_language xato: %s", exc)
         await session.rollback()
         raise
 
@@ -94,9 +163,7 @@ async def set_user_language(session: AsyncSession, user_id: int, language: str) 
 async def update_user_activity(session: AsyncSession, user_id: int) -> None:
     try:
         await session.execute(
-            update(User)
-            .where(User.user_id == user_id)
-            .values(
+            update(User).where(User.user_id == user_id).values(
                 last_active=_now(),
                 message_count=User.message_count + 1,
                 is_blocked=False,
@@ -104,32 +171,20 @@ async def update_user_activity(session: AsyncSession, user_id: int) -> None:
         )
         await session.commit()
     except Exception as exc:
-        logger.error("update_user_activity xato user_id=%s: %s", user_id, exc)
+        logger.error("update_user_activity xato: %s", exc)
         await session.rollback()
 
 
 async def mark_user_blocked(session: AsyncSession, user_id: int) -> None:
     try:
-        await session.execute(
-            update(User).where(User.user_id == user_id).values(is_blocked=True)
-        )
+        await session.execute(update(User).where(User.user_id == user_id).values(is_blocked=True))
         await session.commit()
     except Exception as exc:
-        logger.error("mark_user_blocked xato user_id=%s: %s", user_id, exc)
+        logger.error("mark_user_blocked xato: %s", exc)
         await session.rollback()
 
 
-async def get_all_user_ids(session: AsyncSession) -> list[int]:
-    try:
-        result = await session.execute(select(User.user_id))
-        return list(result.scalars().all())
-    except Exception as exc:
-        logger.error("get_all_user_ids xato: %s", exc)
-        return []
-
-
 async def get_active_user_ids(session: AsyncSession) -> list[int]:
-    """Broadcast uchun: faqat botni bloklamagan userlar."""
     try:
         result = await session.execute(
             select(User.user_id).where(User.is_blocked == False)  # noqa: E712
@@ -145,7 +200,6 @@ async def count_users(session: AsyncSession) -> int:
         result = await session.execute(select(func.count()).select_from(User))
         return result.scalar_one()
     except Exception as exc:
-        logger.error("count_users xato: %s", exc)
         return 0
 
 
@@ -156,33 +210,28 @@ async def count_blocked_users(session: AsyncSession) -> int:
         )
         return result.scalar_one()
     except Exception as exc:
-        logger.error("count_blocked_users xato: %s", exc)
         return 0
 
 
 async def count_active_non_blocked(session: AsyncSession) -> int:
-    """Botni bloklamagan userlar soni."""
     try:
         result = await session.execute(
             select(func.count()).select_from(User).where(User.is_blocked == False)  # noqa: E712
         )
         return result.scalar_one()
     except Exception as exc:
-        logger.error("count_active_non_blocked xato: %s", exc)
         return 0
 
 
 async def count_active_users(session: AsyncSession, since: datetime) -> int:
     try:
         result = await session.execute(
-            select(func.count())
-            .select_from(User)
+            select(func.count()).select_from(User)
             .where(User.last_active >= since)
             .where(User.is_blocked == False)  # noqa: E712
         )
         return result.scalar_one()
     except Exception as exc:
-        logger.error("count_active_users xato: %s", exc)
         return 0
 
 
@@ -193,12 +242,10 @@ async def get_top_active_users(session: AsyncSession, limit: int = 10) -> list[U
         )
         return list(result.scalars().all())
     except Exception as exc:
-        logger.error("get_top_active_users xato: %s", exc)
         return []
 
 
 async def get_full_stats(session: AsyncSession) -> dict:
-    """Admin panel uchun barcha statistikani qaytaradi."""
     now = _now()
     return {
         "total_users": await count_users(session),
@@ -248,7 +295,7 @@ async def get_movie_by_code(session: AsyncSession, code: str) -> Optional[Movie]
         result = await session.execute(select(Movie).where(Movie.code == code))
         return result.scalar_one_or_none()
     except Exception as exc:
-        logger.error("get_movie_by_code xato code=%s: %s", code, exc)
+        logger.error("get_movie_by_code xato: %s", exc)
         return None
 
 
@@ -258,7 +305,22 @@ async def delete_movie_by_code(session: AsyncSession, code: str) -> bool:
         await session.commit()
         return result.rowcount > 0
     except Exception as exc:
-        logger.error("delete_movie_by_code xato code=%s: %s", code, exc)
+        logger.error("delete_movie_by_code xato: %s", exc)
+        await session.rollback()
+        return False
+
+
+async def set_movie_extra_caption(
+    session: AsyncSession, code: str, extra_caption: Optional[str]
+) -> bool:
+    try:
+        result = await session.execute(
+            update(Movie).where(Movie.code == code).values(extra_caption=extra_caption)
+        )
+        await session.commit()
+        return result.rowcount > 0
+    except Exception as exc:
+        logger.error("set_movie_extra_caption xato: %s", exc)
         await session.rollback()
         return False
 
@@ -268,7 +330,6 @@ async def count_movies(session: AsyncSession) -> int:
         result = await session.execute(select(func.count()).select_from(Movie))
         return result.scalar_one()
     except Exception as exc:
-        logger.error("count_movies xato: %s", exc)
         return 0
 
 
@@ -278,12 +339,9 @@ async def count_movies(session: AsyncSession) -> int:
 
 async def get_required_chats(session: AsyncSession) -> list[RequiredChat]:
     try:
-        result = await session.execute(
-            select(RequiredChat).order_by(RequiredChat.added_at)
-        )
+        result = await session.execute(select(RequiredChat).order_by(RequiredChat.added_at))
         return list(result.scalars().all())
     except Exception as exc:
-        logger.error("get_required_chats xato: %s", exc)
         return []
 
 
@@ -297,9 +355,7 @@ async def add_required_chat(
     chat_type: str,
 ) -> tuple[RequiredChat, bool]:
     try:
-        result = await session.execute(
-            select(RequiredChat).where(RequiredChat.chat_id == chat_id)
-        )
+        result = await session.execute(select(RequiredChat).where(RequiredChat.chat_id == chat_id))
         existing = result.scalar_one_or_none()
         if existing is not None:
             existing.title = title
@@ -309,50 +365,37 @@ async def add_required_chat(
             await session.commit()
             return existing, False
         chat = RequiredChat(
-            chat_id=chat_id,
-            title=title,
-            username=username,
-            invite_link=invite_link,
-            chat_type=chat_type,
+            chat_id=chat_id, title=title, username=username,
+            invite_link=invite_link, chat_type=chat_type,
         )
         session.add(chat)
         await session.commit()
         return chat, True
     except Exception as exc:
-        logger.error("add_required_chat xato chat_id=%s: %s", chat_id, exc)
+        logger.error("add_required_chat xato: %s", exc)
         await session.rollback()
         raise
 
 
 async def remove_required_chat(session: AsyncSession, chat_id: int) -> bool:
     try:
-        result = await session.execute(
-            delete(RequiredChat).where(RequiredChat.chat_id == chat_id)
-        )
+        result = await session.execute(delete(RequiredChat).where(RequiredChat.chat_id == chat_id))
         await session.commit()
         return result.rowcount > 0
     except Exception as exc:
-        logger.error("remove_required_chat xato chat_id=%s: %s", chat_id, exc)
         await session.rollback()
         return False
 
 
-async def update_chat_member_count(
-    session: AsyncSession,
-    chat_id: int,
-    member_count: int,
-) -> None:
-    """Kanal a'zolar sonini DB ga yozadi."""
+async def update_chat_member_count(session: AsyncSession, chat_id: int, member_count: int) -> None:
     try:
         await session.execute(
-            update(RequiredChat)
-            .where(RequiredChat.chat_id == chat_id)
-            .values(
+            update(RequiredChat).where(RequiredChat.chat_id == chat_id).values(
                 member_count=member_count,
                 member_count_updated_at=_now(),
             )
         )
         await session.commit()
     except Exception as exc:
-        logger.error("update_chat_member_count xato chat_id=%s: %s", chat_id, exc)
+        logger.error("update_chat_member_count xato: %s", exc)
         await session.rollback()
