@@ -246,7 +246,7 @@ async def cb_check_subscription(
 # Kino kodi — oddiy xabar orqali
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.message(StateFilter(None), F.text.regexp(r"^[A-Za-z0-9]+$"))
+@router.message(StateFilter(None), F.text.regexp(r"^[A-Za-z0-9]{4,5}$"))
 async def handle_movie_code(message: Message, session: AsyncSession, bot: Bot) -> None:
     """
     Alphanumeric xabar → kino kodi sifatida qabul qilinadi.
