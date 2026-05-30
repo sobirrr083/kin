@@ -89,3 +89,21 @@ class BotSettings(Base):
 
     def __repr__(self) -> str:
         return f"<BotSettings next_code={self.next_code}>"
+
+
+class DynamicAdmin(Base):
+    """
+    Dinamik adminlar — bot orqali qo'shilgan adminlar.
+    Bosh admin (ADMIN_IDS[0]) o'chirib bo'lmaydi.
+    """
+    __tablename__ = "dynamic_admins"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    added_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<DynamicAdmin user_id={self.user_id}>"

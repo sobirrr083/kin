@@ -26,15 +26,15 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "check_subscription_btn": "✅ Tekshirish",
         "welcome": (
-            "🎬 <b>KinoBotga xush kelibsiz</b>, {name}!\n\n"
-            "Men sizning shaxsiy kino omboringizman.\n"
+            "🎬 <b>Tezkor Cinemaga xush kelibsiz</b>, {name}!\n\n"
+            "Men sizning shaxsiy kino yordamchingizman.\n"
             "<b>Kino kodini</b> yuboring — filmni darhol oling.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📌 <b>Qanday foydalanish:</b>\n"
+            "📌 <b>Qanday ishlaydi:</b>\n"
             "  • Kino kodini yozing — masalan <code>5055</code>\n"
             "  • Filmni soniyalar ichida oling 🍿\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Kod bilmasangiz — administrator bilan bog'laning."
+            "Kodni bilmasangiz — @tezkorcinema quyidagi kanal orqali toping."
         ),
         "movie_not_found": (
             "❌ <b>Kino topilmadi.</b>\n\n"

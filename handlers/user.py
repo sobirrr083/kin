@@ -77,6 +77,9 @@ async def _send_movie(
     if movie.extra_caption:
         caption = f"{caption}\n\n{movie.extra_caption}"
 
+    # Har doim qo'shiladigan qat'iy matn (oxirida)
+    caption = f"{caption}\n\nTezkor Cinema - 🍿 Kino olamiga eng qisqa yo'l."
+
     try:
         if movie.file_type == "video":
             await bot.send_video(chat_id, video=movie.file_id, caption=caption, parse_mode="HTML")

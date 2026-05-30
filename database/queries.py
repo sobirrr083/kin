@@ -399,3 +399,68 @@ async def update_chat_member_count(session: AsyncSession, chat_id: int, member_c
     except Exception as exc:
         logger.error("update_chat_member_count xato: %s", exc)
         await session.rollback()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Dinamik adminlar boshqaruvi
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def get_dynamic_admin_ids(session: AsyncSession) -> list[int]:
+    """DB dagi barcha dinamik admin IDlarini qaytaradi."""
+    from database.models import DynamicAdmin
+    from sqlalchemy import select
+    result = await session.execute(select(DynamicAdmin.user_id))
+    return [row[0] for row in result.fetchall()]
+
+
+async def add_dynamic_admin(session: AsyncSession, user_id: int, added_by: int) -> tuple[bool, bool]:
+    """
+    Yangi dinamik admin qo'shadi.
+    Qaytaradi: (success, already_exists)
+    """
+    from database.models import DynamicAdmin
+    from sqlalchemy import select
+    try:
+        existing = await session.execute(
+            select(DynamicAdmin).where(DynamicAdmin.user_id == user_id)
+        )
+        if existing.scalar_one_or_none():
+            return False, True  # allaqachon bor
+        admin = DynamicAdmin(user_id=user_id, added_by=added_by)
+        session.add(admin)
+        await session.commit()
+        return True, False
+    except Exception as exc:
+        await session.rollback()
+        logger.error("add_dynamic_admin xato: %s", exc)
+        return False, False
+
+
+async def remove_dynamic_admin(session: AsyncSession, user_id: int) -> bool:
+    """Dinamik adminni o'chiradi. Qaytaradi: True — o'chirildi."""
+    from database.models import DynamicAdmin
+    from sqlalchemy import select, delete
+    try:
+        result = await session.execute(
+            select(DynamicAdmin).where(DynamicAdmin.user_id == user_id)
+        )
+        admin = result.scalar_one_or_none()
+        if not admin:
+            return False
+        await session.execute(
+            delete(DynamicAdmin).where(DynamicAdmin.user_id == user_id)
+        )
+        await session.commit()
+        return True
+    except Exception as exc:
+        await session.rollback()
+        logger.error("remove_dynamic_admin xato: %s", exc)
+        return False
+
+
+async def get_all_dynamic_admins(session: AsyncSession):
+    """Barcha dinamik adminlar ro'yxatini qaytaradi."""
+    from database.models import DynamicAdmin
+    from sqlalchemy import select
+    result = await session.execute(select(DynamicAdmin).order_by(DynamicAdmin.added_at))
+    return result.scalars().all()

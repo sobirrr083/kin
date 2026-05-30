@@ -12,6 +12,8 @@ Guruhga video/document yuborilganda:
     "1234 | Inception"     → kod=1234, title=Inception
     "1234"                 → kod=1234, title yo'q
     (caption yo'q)         → avtomatik kod, title yo'q
+
+Har bir kinoga qattiy qo'shimcha: "Tezkor Cinema - 🍿 Kino olamiga eng qisqa yo'l."
 """
 from __future__ import annotations
 
@@ -31,9 +33,10 @@ logger = logging.getLogger(__name__)
 router = Router(name="ingestion")
 router.message.filter(IsStorageGroup())
 
+# Har bir kino yuborilganda captionning OXIRIGA qo'shiladigan qat'iy matn
+FIXED_CAPTION_SUFFIX = "\n\nTezkor Cinema - 🍿 Kino olamiga eng qisqa yo'l."
+
 # ── Caption parsing ───────────────────────────────────────────────────────────
-# Agar birinchi "so'z" faqat raqam yoki harf-raqam bo'lsa → kod
-# Agar birinchi "so'z" harflardan iborat (matn) bo'lsa → title, kod avtomatik
 _CODE_RE = re.compile(r"^(?P<code>[A-Za-z0-9]+)(?:\s*\|\s*|\s+)(?P<title>.+)?", re.DOTALL)
 _ONLY_CODE_RE = re.compile(r"^(?P<code>[A-Za-z0-9]+)\s*$")
 _STARTS_WITH_DIGIT = re.compile(r"^\d")
@@ -53,29 +56,22 @@ def _parse_caption(caption: Optional[str]) -> tuple[Optional[str], Optional[str]
 
     caption = caption.strip()
 
-    # Faqat kod: "1234" yoki "ABC1"
     m = _ONLY_CODE_RE.match(caption)
     if m:
         token = m.group("code")
-        # Agar faqat raqamlardan iborat yoki harf+raqam aralash → kod
         if token.isdigit() or (not token.isalpha()):
             return token, None
-        # Faqat harflardan iborat ("Inception") → title sifatida qabul qilamiz
         return None, token
 
-    # Kod | Title yoki Kod  Title
     m = _CODE_RE.match(caption)
     if m:
         token = m.group("code")
         raw_title = m.group("title")
         title = raw_title.strip() if raw_title else None
 
-        # Birinchi token raqam yoki harf+raqam → kod
         if token.isdigit() or (not token.isalpha()):
             return token, title or None
 
-        # Birinchi token faqat harflar → title ning bir qismi
-        # Butun captionni title sifatida olamiz
         return None, caption
 
     return None, caption or None
@@ -85,7 +81,6 @@ def _parse_caption(caption: Optional[str]) -> tuple[Optional[str], Optional[str]
 
 @router.message(F.video | F.document)
 async def handle_movie_upload(message: Message, session: AsyncSession, bot: Bot) -> None:
-    # Fayl ma'lumotlari
     if message.video:
         file_id = message.video.file_id
         file_type = "video"
@@ -95,17 +90,14 @@ async def handle_movie_upload(message: Message, session: AsyncSession, bot: Bot)
     else:
         return
 
-    # Caption parse
     code, title = _parse_caption(message.caption)
 
-    # Kod yo'q → avtomatik beramiz
     auto_code = False
     if code is None:
         code = str(await consume_next_code(session))
         auto_code = True
         logger.info("Avtomatik kod berildi: %s", code)
 
-    # DB ga saqlaymiz
     movie, created = await save_movie(
         session,
         code=code,

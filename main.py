@@ -49,6 +49,15 @@ async def main() -> None:
 
     await create_tables()
 
+    # Dinamik adminlarni DB dan yuklash
+    from database.engine import async_session_maker
+    from database.queries import get_dynamic_admin_ids
+    from filters.admin import update_dynamic_admins
+    async with async_session_maker() as _startup_session:
+        _dyn_ids = await get_dynamic_admin_ids(_startup_session)
+        update_dynamic_admins(_dyn_ids)
+        logger.info("Dinamik adminlar yuklandi: %s", _dyn_ids)
+
     bot = Bot(
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),

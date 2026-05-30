@@ -1,5 +1,11 @@
 """
 handlers/admin.py — To'liq admin boshqaruv paneli.
+
+Yangiliklar:
+  - Admin qo'shish / o'chirish (savol-javob uslubi, ID orqali)
+  - Bosh admin (ADMIN_IDS[0]) o'chirib bo'lmaydi
+  - Majburiy kanal/guruh qo'shish faqat ID orqali (forward olib tashlandi)
+  - /cancel bilan istalgan holatdan chiqish
 """
 from __future__ import annotations
 
@@ -29,8 +35,12 @@ from database.queries import (
     mark_user_blocked,
     remove_required_chat,
     update_chat_member_count,
+    add_dynamic_admin,
+    remove_dynamic_admin,
+    get_dynamic_admin_ids,
+    get_all_dynamic_admins,
 )
-from filters.admin import IsAdmin
+from filters.admin import IsAdmin, get_head_admin_id, get_all_admin_ids, update_dynamic_admins
 from keyboards.inline import (
     kb_admin_back,
     kb_admin_main,
@@ -54,7 +64,9 @@ class AdminStates(StatesGroup):
     waiting_broadcast = State()
     waiting_search_code = State()
     waiting_delete_code = State()
-    waiting_add_chat = State()
+    waiting_add_chat = State()       # kanal ID so'rash
+    waiting_add_admin = State()      # yangi admin ID so'rash
+    waiting_remove_admin = State()   # o'chiriladigan admin ID so'rash
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -117,18 +129,39 @@ async def _fetch_member_count(bot: Bot, chat_id: int) -> int:
         return -1
 
 
+async def _reload_dynamic_admins(session: AsyncSession) -> None:
+    """DB dan dinamik adminlarni yuklaydi va xotiraga saqlaydi."""
+    ids = await get_dynamic_admin_ids(session)
+    update_dynamic_admins(ids)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # /admin
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, state: FSMContext) -> None:
-    logger.info("Admin panel: user_id=%s | ADMIN_IDS=%s", message.from_user.id, settings.ADMIN_IDS)
+async def cmd_admin(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    logger.info("Admin panel: user_id=%s | all_admins=%s", message.from_user.id, get_all_admin_ids())
+    await _reload_dynamic_admins(session)
     try:
         await _show_panel(message, state)
     except Exception as exc:
         logger.error("cmd_admin xato: %s", exc)
         await message.answer("❌ Admin panel ochishda xato yuz berdi.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# /cancel — istalgan holatdan chiqish
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    current = await state.get_state()
+    await state.clear()
+    if current:
+        await message.answer("❌ Bekor qilindi.\n\n" + _PANEL_TEXT, reply_markup=kb_admin_main(), parse_mode="HTML")
+    else:
+        await message.answer(_PANEL_TEXT, reply_markup=kb_admin_main(), parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -203,7 +236,7 @@ async def cb_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
             "📢 <b>Broadcast</b>\n\n"
             "Barcha foydalanuvchilarga yuboriladigan xabarni yuboring.\n"
             "Matn, rasm, video — hammasi qo'llab-quvvatlanadi.\n\n"
-            "<i>Bekor qilish uchun tugmani bosing.</i>",
+            "<i>Bekor qilish uchun /cancel yuboring.</i>",
             reply_markup=kb_cancel(),
             parse_mode="HTML",
         )
@@ -288,7 +321,7 @@ async def cb_manage_movies(callback: CallbackQuery) -> None:
 async def cb_search_movie(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await state.set_state(AdminStates.waiting_search_code)
-        await _safe_edit(callback, "🔍 <b>Kino Qidirish</b>\n\nKino kodini yuboring:", reply_markup=kb_cancel(), parse_mode="HTML")
+        await _safe_edit(callback, "🔍 <b>Kino Qidirish</b>\n\nKino kodini yuboring:\n<i>Bekor qilish: /cancel</i>", reply_markup=kb_cancel(), parse_mode="HTML")
     except Exception as exc:
         logger.error("cb_search_movie xato: %s", exc)
         await state.clear()
@@ -328,7 +361,7 @@ async def cb_delete_movie(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AdminStates.waiting_delete_code)
         await _safe_edit(
             callback,
-            "🗑 <b>Kinoni O'chirish</b>\n\nKino kodini yuboring:\n<i>⚠️ Bu amal qaytarib bo'lmaydi!</i>",
+            "🗑 <b>Kinoni O'chirish</b>\n\nKino kodini yuboring:\n<i>⚠️ Bu amal qaytarib bo'lmaydi!</i>\n<i>Bekor qilish: /cancel</i>",
             reply_markup=kb_cancel(),
             parse_mode="HTML",
         )
@@ -358,7 +391,217 @@ async def process_delete(message: Message, session: AsyncSession, state: FSMCont
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 📡 Majburiy kanallar
+# 👤 Admin boshqaruvi
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin:manage_admins")
+async def cb_manage_admins(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Adminlar ro'yxatini ko'rsatadi."""
+    try:
+        await _reload_dynamic_admins(session)
+        dynamic_admins = await get_all_dynamic_admins(session)
+        head_id = get_head_admin_id()
+
+        lines = []
+        # Bosh admin
+        if head_id:
+            lines.append(f"👑 <b>Bosh admin:</b> <code>{head_id}</code>  <i>(o'chirib bo'lmaydi)</i>")
+
+        # Statik qo'shimcha adminlar (ADMIN_IDS[1:])
+        for uid in settings.ADMIN_IDS[1:]:
+            lines.append(f"🔑 <b>Statik admin:</b> <code>{uid}</code>  <i>(.env orqali)</i>")
+
+        # Dinamik adminlar
+        if dynamic_admins:
+            lines.append("")
+            lines.append("🤖 <b>Bot orqali qo'shilgan adminlar:</b>")
+            for da in dynamic_admins:
+                added = da.added_at.strftime("%d.%m.%Y %H:%M") if da.added_at else "—"
+                lines.append(f"  👤 <code>{da.user_id}</code>  |  📅 {added}")
+        else:
+            lines.append("\n<i>Bot orqali qo'shilgan admin yo'q.</i>")
+
+        text = "👤 <b>Adminlar Boshqaruvi</b>\n\n" + "\n".join(lines)
+        await _safe_edit(callback, text, reply_markup=kb_admin_manage_admins(), parse_mode="HTML")
+    except Exception as exc:
+        logger.error("cb_manage_admins xato: %s", exc)
+        await _safe_edit(callback, "❌ Xato yuz berdi.", reply_markup=kb_admin_back(), parse_mode="HTML")
+    finally:
+        await _safe_answer(callback)
+
+
+@router.callback_query(F.data == "admin:add_admin")
+async def cb_add_admin(callback: CallbackQuery, state: FSMContext) -> None:
+    """Yangi admin qo'shish — ID so'raydi."""
+    try:
+        await state.set_state(AdminStates.waiting_add_admin)
+        await _safe_edit(
+            callback,
+            "👤 <b>Yangi Admin Qo'shish</b>\n\n"
+            "Yangi adminning Telegram ID sini yuboring.\n\n"
+            "📌 <b>Misol:</b> <code>123456789</code>\n\n"
+            "<i>Bekor qilish uchun /cancel yuboring.</i>",
+            reply_markup=kb_cancel(),
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        logger.error("cb_add_admin xato: %s", exc)
+        await state.clear()
+    finally:
+        await _safe_answer(callback)
+
+
+@router.message(AdminStates.waiting_add_admin)
+async def process_add_admin(message: Message, session: AsyncSession, state: FSMContext) -> None:
+    """Yuborilgan IDni tekshirib, admin qo'shadi."""
+    await state.clear()
+
+    raw = (message.text or "").strip()
+    if not raw.lstrip("-").isdigit():
+        await message.answer(
+            "❌ <b>Noto'g'ri format.</b>\n\n"
+            "Faqat raqamdan iborat Telegram ID yuboring.\n"
+            "<i>Misol: <code>123456789</code></i>",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        return
+
+    new_id = int(raw)
+
+    # Bosh adminni qayta qo'shishning hojati yo'q
+    if new_id == get_head_admin_id():
+        await message.answer(
+            f"ℹ️ <code>{new_id}</code> allaqachon bosh admin.",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        return
+
+    # Statik adminlarda bormi?
+    if new_id in settings.ADMIN_IDS:
+        await message.answer(
+            f"ℹ️ <code>{new_id}</code> allaqachon statik admin (.env orqali).",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        return
+
+    success, already = await add_dynamic_admin(session, user_id=new_id, added_by=message.from_user.id)
+    await _reload_dynamic_admins(session)
+
+    if already:
+        await message.answer(
+            f"ℹ️ <code>{new_id}</code> allaqachon admin sifatida qo'shilgan.",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+    elif success:
+        await message.answer(
+            f"✅ <b>Admin qo'shildi!</b>\n\n"
+            f"🆔 <code>{new_id}</code>\n"
+            f"➕ Qo'shdi: <code>{message.from_user.id}</code>",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        logger.info("Yangi admin qo'shildi: user_id=%s | qo'shdi=%s", new_id, message.from_user.id)
+    else:
+        await message.answer(
+            "❌ Saqlashda xato yuz berdi. Qayta urinib ko'ring.",
+            reply_markup=kb_admin_back(),
+        )
+
+
+@router.callback_query(F.data == "admin:remove_admin")
+async def cb_remove_admin(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Admin o'chirish — ID so'raydi."""
+    try:
+        dynamic_admins = await get_all_dynamic_admins(session)
+        if not dynamic_admins:
+            await _safe_edit(
+                callback,
+                "ℹ️ O'chiriladigan dinamik admin yo'q.\n\n"
+                "<i>Statik adminlar (.env) bu yerda o'chirib bo'lmaydi.</i>",
+                reply_markup=kb_admin_manage_admins(),
+                parse_mode="HTML",
+            )
+            await _safe_answer(callback)
+            return
+
+        await state.set_state(AdminStates.waiting_remove_admin)
+        lines = "\n".join(f"  • <code>{da.user_id}</code>" for da in dynamic_admins)
+        await _safe_edit(
+            callback,
+            "🗑 <b>Admin O'chirish</b>\n\n"
+            "Quyidagi dinamik adminlardan birining ID sini yuboring:\n\n"
+            f"{lines}\n\n"
+            "⚠️ <i>Bosh admin o'chirib bo'lmaydi.</i>\n"
+            "<i>Bekor qilish: /cancel</i>",
+            reply_markup=kb_cancel(),
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        logger.error("cb_remove_admin xato: %s", exc)
+        await state.clear()
+    finally:
+        await _safe_answer(callback)
+
+
+@router.message(AdminStates.waiting_remove_admin)
+async def process_remove_admin(message: Message, session: AsyncSession, state: FSMContext) -> None:
+    """Yuborilgan IDni tekshirib, adminni o'chiradi."""
+    await state.clear()
+
+    raw = (message.text or "").strip()
+    if not raw.lstrip("-").isdigit():
+        await message.answer(
+            "❌ Faqat raqamdan iborat Telegram ID yuboring.",
+            reply_markup=kb_admin_back(),
+        )
+        return
+
+    target_id = int(raw)
+
+    # Bosh adminni o'chirib bo'lmaydi
+    head_id = get_head_admin_id()
+    if target_id == head_id:
+        await message.answer(
+            f"🚫 <code>{target_id}</code> — bosh admin, uni o'chirib bo'lmaydi!",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        return
+
+    # Statik adminlarni o'chirib bo'lmaydi
+    if target_id in settings.ADMIN_IDS:
+        await message.answer(
+            f"🚫 <code>{target_id}</code> statik admin (.env orqali belgilangan).\n"
+            "Bu yerda faqat bot orqali qo'shilgan adminlarni o'chirish mumkin.",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        return
+
+    deleted = await remove_dynamic_admin(session, user_id=target_id)
+    await _reload_dynamic_admins(session)
+
+    if deleted:
+        await message.answer(
+            f"✅ <b>Admin o'chirildi:</b> <code>{target_id}</code>",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        logger.info("Admin o'chirildi: user_id=%s | o'chirdi=%s", target_id, message.from_user.id)
+    else:
+        await message.answer(
+            f"❌ <code>{target_id}</code> dinamik adminlar ro'yxatida topilmadi.",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📡 Majburiy kanallar — faqat ID orqali
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "admin:manage_chats")
@@ -420,7 +663,7 @@ async def cb_channel_monitoring(callback: CallbackQuery, session: AsyncSession, 
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ➕ Kanal qo'shish
+# ➕ Kanal qo'shish — FAQAT ID orqali (savol-javob)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "admin:add_chat")
@@ -430,12 +673,12 @@ async def cb_add_chat(callback: CallbackQuery, state: FSMContext) -> None:
         await _safe_edit(
             callback,
             "📡 <b>Kanal / Guruh Qo'shish</b>\n\n"
-            "Quyidagi usullardan birini ishlating:\n\n"
-            "1️⃣ <b>ID orqali:</b> <code>-1001234567890</code>\n\n"
-            "2️⃣ <b>Username orqali:</b> <code>@mening_kanalim</code>\n\n"
-            "3️⃣ <b>Forward orqali:</b> Kanal/guruhdan istalgan xabarni\n"
-            "   shu yerga forward qiling\n\n"
-            "<i>⚠️ Bot kanalga admin sifatida qo'shilgan bo'lishi shart!</i>",
+            "Kanal yoki guruhning <b>ID</b> sini yuboring.\n\n"
+            "📌 <b>Misol:</b>\n"
+            "  • <code>-1001234567890</code>\n"
+            "  • <code>1001234567890</code>  <i>(- belgisiz ham bo'ladi)</i>\n\n"
+            "⚠️ <i>Bot kanalga admin sifatida qo'shilgan bo'lishi shart!</i>\n\n"
+            "<i>Bekor qilish: /cancel</i>",
             reply_markup=kb_cancel(),
             parse_mode="HTML",
         )
@@ -448,41 +691,42 @@ async def cb_add_chat(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminStates.waiting_add_chat)
 async def process_add_chat(message: Message, session: AsyncSession, state: FSMContext, bot: Bot) -> None:
+    """
+    Faqat ID orqali kanal/guruh qo'shadi.
+    - yoki - belgilarni hisobga oladi.
+    """
     await state.clear()
 
-    chat_id_input = None
-    source = ""
+    raw = (message.text or "").strip()
 
-    # 1) forward_from_chat
-    if message.forward_from_chat:
-        chat_id_input = message.forward_from_chat.id
-        source = f"forward ({message.forward_from_chat.title})"
+    # Faqat raqam (yoki -raqam) bo'lishi kerak
+    clean = raw.lstrip("-")
+    if not clean.isdigit():
+        await message.answer(
+            "❌ <b>Noto'g'ri format.</b>\n\n"
+            "Faqat kanal/guruh <b>ID</b> sini yuboring.\n"
+            "📌 Misol: <code>-1001234567890</code> yoki <code>1001234567890</code>",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
+        )
+        return
 
-    # 2) forward_origin (aiogram v3.7+)
-    elif message.forward_origin and hasattr(message.forward_origin, "chat"):
-        if message.forward_origin.chat:
-            chat_id_input = message.forward_origin.chat.id
-            source = f"forward_origin ({message.forward_origin.chat.title})"
-
-    # 3) Matn
-    if chat_id_input is None:
-        if not message.text or not message.text.strip():
-            await message.answer("❌ Matn yuboring yoki kanal/guruhdan xabar forward qiling.", reply_markup=kb_admin_back())
-            return
-        raw = message.text.strip()
-        source = f"matn ({raw!r})"
-        chat_id_input = int(raw) if raw.lstrip("-").isdigit() else (raw if raw.startswith("@") else f"@{raw}")
+    # - belgisi bo'lmasa qo'shamiz (kanallar manfiy ID bo'ladi)
+    if not raw.startswith("-"):
+        chat_id_int = -int(clean)
+    else:
+        chat_id_int = int(raw)
 
     try:
-        chat = await bot.get_chat(chat_id_input)
+        chat = await bot.get_chat(chat_id_int)
     except Exception as exc:
         await message.answer(
             f"❌ <b>Kanal/guruh topilmadi.</b>\n\n"
             f"  • Bot kanalga <b>admin</b> sifatida qo'shilganmi?\n"
-            f"  • ID to'g'rimi? <code>{chat_id_input}</code>\n"
-            f"  • Yoki kanal/guruhdan xabar <b>forward</b> qiling\n\n"
+            f"  • ID to'g'rimi? <code>{chat_id_int}</code>\n\n"
             f"Xato: <code>{exc}</code>",
-            reply_markup=kb_admin_back(), parse_mode="HTML",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
         )
         return
 
@@ -519,11 +763,15 @@ async def process_add_chat(message: Message, session: AsyncSession, state: FSMCo
             f"🆔 <b>ID:</b> <code>{chat.id}</code>\n"
             f"👤 <b>Username:</b> {'@' + username if username else '—'}\n"
             f"👥 <b>A'zolar:</b> {members_str}\n"
-            f"🔗 <b>Havola:</b> {'✅ Bor' if invite_link else '⚠️ Yoq'}\n"
-            f"📥 <b>Manba:</b> {source}",
-            reply_markup=kb_admin_back(), parse_mode="HTML",
+            f"🔗 <b>Havola:</b> {'✅ Bor' if invite_link else '⚠️ Yoq'}",
+            reply_markup=kb_admin_back(),
+            parse_mode="HTML",
         )
-        logger.info("Kanal %s: id=%s title=%s members=%s admin=%s", "qo'shildi" if created else "yangilandi", chat.id, chat.title, member_count, message.from_user.id)
+        logger.info(
+            "Kanal %s: id=%s title=%s members=%s admin=%s",
+            "qo'shildi" if created else "yangilandi",
+            chat.id, chat.title, member_count, message.from_user.id,
+        )
     except Exception as exc:
         logger.error("process_add_chat DB xato: %s", exc)
         await message.answer("❌ Kanalni saqlashda xato yuz berdi.", reply_markup=kb_admin_back())
@@ -608,11 +856,10 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 📝 Kino extra caption (qo'shimcha matn) boshqaruvi
+# 📝 Kino extra caption boshqaruvi
 # ═══════════════════════════════════════════════════════════════════════════════
-# Bu qismni handlers/admin.py ga qo'shamiz — AdminStates ga yangi holatlar kerak
 
-from database.queries import set_movie_extra_caption  # noqa: E402 (already imported above via *)
+from database.queries import set_movie_extra_caption  # noqa: E402
 
 
 class _ExtraStates(StatesGroup):
@@ -647,7 +894,8 @@ async def cb_set_extra(callback: CallbackQuery, state: FSMContext) -> None:
             callback,
             "📝 <b>Qo'shimcha Matn O'rnatish</b>\n\n"
             "1-qadam: Kino kodini yuboring:\n"
-            "<i>Misol: <code>1111</code></i>",
+            "<i>Misol: <code>1111</code></i>\n"
+            "<i>Bekor qilish: /cancel</i>",
             reply_markup=kb_cancel(),
             parse_mode="HTML",
         )
@@ -674,14 +922,14 @@ async def process_extra_code(message: Message, session: AsyncSession, state: FSM
         )
         await state.clear()
         return
-    # Kodni saqlab, matnni so'raymiz
     await state.set_state(_ExtraStates.waiting_extra_text)
     await state.update_data(extra_code=code)
     current = f"\n\nHozirgi qo'shimcha matn:\n<code>{movie.extra_caption}</code>" if movie.extra_caption else ""
     await message.answer(
         f"✅ Kod topildi: <b>{movie.title or code}</b>{current}\n\n"
         "2-qadam: Yangi qo'shimcha matnni yuboring.\n"
-        "<i>Matn, emoji, havolalar — hammasi bo'ladi.</i>",
+        "<i>Matn, emoji, havolalar — hammasi bo'ladi.</i>\n"
+        "<i>Bekor qilish: /cancel</i>",
         reply_markup=kb_cancel(),
         parse_mode="HTML",
     )
@@ -692,7 +940,6 @@ async def process_extra_text(message: Message, session: AsyncSession, state: FSM
     state_data = await state.get_data()
     code = state_data.get("extra_code", "")
     await state.clear()
-
     if not message.text or not message.text.strip():
         await message.answer("❌ Matn bo'sh bo'lmasligi kerak.", reply_markup=kb_admin_back())
         return
@@ -718,7 +965,8 @@ async def cb_clear_extra(callback: CallbackQuery, state: FSMContext) -> None:
         await _safe_edit(
             callback,
             "🗑 <b>Qo'shimcha Matnni O'chirish</b>\n\n"
-            "Qo'shimcha matni o'chiriladigan kino kodini yuboring:",
+            "Qo'shimcha matni o'chiriladigan kino kodini yuboring:\n"
+            "<i>Bekor qilish: /cancel</i>",
             reply_markup=kb_cancel(),
             parse_mode="HTML",
         )
@@ -749,34 +997,24 @@ async def process_clear_extra(message: Message, session: AsyncSession, state: FS
         )
 
 
-@router.callback_query(F.data == "admin:preview_extra")
-async def cb_preview_extra(callback: CallbackQuery, state: FSMContext) -> None:
-    try:
-        await state.set_state(_ExtraStates.waiting_extra_code)
-        await _safe_edit(
-            callback,
-            "👁 <b>Kinoni Ko'rish</b>\n\nKino kodini yuboring:",
-            reply_markup=kb_cancel(),
-            parse_mode="HTML",
-        )
-    except Exception as exc:
-        logger.error("cb_preview_extra xato: %s", exc)
-        await state.clear()
-    finally:
-        await _safe_answer(callback)
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# 🔢 Kino kodi sanagichi boshqaruvi
+# 🔢 Kino kodi sanagichi
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class _CodeCounterStates(StatesGroup):
     waiting_new_code = State()
 
 
+def kb_code_counter(current: int) -> object:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✏️ O'zgartirish", callback_data="admin:edit_code_counter"))
+    builder.row(InlineKeyboardButton(text="🔄 Yangilash", callback_data="admin:code_counter"))
+    builder.row(InlineKeyboardButton(text="◀️ Asosiy menyu", callback_data="admin:back"))
+    return builder.as_markup()
+
+
 @router.callback_query(F.data == "admin:code_counter")
 async def cb_code_counter(callback: CallbackQuery, session: AsyncSession) -> None:
-    """Hozirgi kod sanagichini ko'rsatadi."""
     try:
         current = await get_next_code(session)
         await _safe_edit(
@@ -785,7 +1023,7 @@ async def cb_code_counter(callback: CallbackQuery, session: AsyncSession) -> Non
             f"📌 Keyingi yangi kinoga beriladigan kod: <b><code>{current}</code></b>\n\n"
             "ℹ️ Guruhga video yuborilganda caption da kod yozilmasa,\n"
             "shu raqam avtomatik beriladi va sanagich +1 bo'ladi.\n\n"
-            "Sanagichni o'zgartirmoqchi bo'lsangiz, \n"
+            "Sanagichni o'zgartirmoqchi bo'lsangiz,\n"
             "<b>✏️ O'zgartirish</b> tugmasini bosing.",
             reply_markup=kb_code_counter(current),
             parse_mode="HTML",
@@ -807,7 +1045,8 @@ async def cb_edit_code_counter(callback: CallbackQuery, state: FSMContext) -> No
             "Yangi boshlang'ich kodni yuboring.\n\n"
             "📌 <b>Misol:</b> <code>2000</code>\n"
             "⚠️ Faqat musbat butun son kiriting!\n\n"
-            "<i>Keyingi kino shu raqamdan boshlanadi.</i>",
+            "<i>Keyingi kino shu raqamdan boshlanadi.</i>\n"
+            "<i>Bekor qilish: /cancel</i>",
             reply_markup=kb_cancel(),
             parse_mode="HTML",
         )
@@ -821,7 +1060,6 @@ async def cb_edit_code_counter(callback: CallbackQuery, state: FSMContext) -> No
 @router.message(_CodeCounterStates.waiting_new_code)
 async def process_new_code(message: Message, session: AsyncSession, state: FSMContext) -> None:
     await state.clear()
-
     if not message.text or not message.text.strip().isdigit():
         await message.answer(
             "❌ Noto'g'ri format. Faqat musbat butun son kiriting.\n"
@@ -830,15 +1068,10 @@ async def process_new_code(message: Message, session: AsyncSession, state: FSMCo
             parse_mode="HTML",
         )
         return
-
     new_val = int(message.text.strip())
     if new_val < 1:
-        await message.answer(
-            "❌ Raqam 1 dan katta bo'lishi kerak.",
-            reply_markup=kb_admin_back(),
-        )
+        await message.answer("❌ Raqam 1 dan katta bo'lishi kerak.", reply_markup=kb_admin_back())
         return
-
     ok = await set_next_code(session, new_val)
     if ok:
         await message.answer(
@@ -852,10 +1085,23 @@ async def process_new_code(message: Message, session: AsyncSession, state: FSMCo
         await message.answer("❌ Saqlashda xato yuz berdi.", reply_markup=kb_admin_back())
 
 
-def kb_code_counter(current: int) -> object:
-    """Kod sanagichi boshqaruv tugmalari."""
+# ═══════════════════════════════════════════════════════════════════════════════
+# Keyboard yordamchi funksiyalar
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def kb_admin_manage_admins() -> object:
+    """Adminlar boshqaruv tugmalari."""
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="✏️ O'zgartirish", callback_data="admin:edit_code_counter"))
-    builder.row(InlineKeyboardButton(text="🔄 Yangilash", callback_data="admin:code_counter"))
+    builder.row(InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="admin:add_admin"))
+    builder.row(InlineKeyboardButton(text="🗑 Admin o'chirish", callback_data="admin:remove_admin"))
+    builder.row(InlineKeyboardButton(text="🔄 Yangilash", callback_data="admin:manage_admins"))
     builder.row(InlineKeyboardButton(text="◀️ Asosiy menyu", callback_data="admin:back"))
+    return builder.as_markup()
+
+
+def kb_admin_extra_caption() -> object:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="➕ Qo'shish / Tahrirlash", callback_data="admin:set_extra"))
+    builder.row(InlineKeyboardButton(text="🗑 O'chirish", callback_data="admin:clear_extra"))
+    builder.row(InlineKeyboardButton(text="◀️ Orqaga", callback_data="admin:back"))
     return builder.as_markup()

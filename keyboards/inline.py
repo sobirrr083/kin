@@ -32,13 +32,12 @@ def kb_subscription(chats: list[RequiredChat], lang: str) -> InlineKeyboardMarku
 
     builder = InlineKeyboardBuilder()
     for chat in chats:
-        # Public kanal → t.me/username, private → invite_link
         if chat.username:
             url = f"https://t.me/{chat.username.lstrip('@')}"
         elif chat.invite_link:
             url = chat.invite_link
         else:
-            continue  # Havola yo'q bo'lsa tugma qo'shmaymiz
+            continue
         label = "📢 " + chat.title if chat.chat_type == "channel" else "👥 " + chat.title
         builder.row(InlineKeyboardButton(text=label, url=url))
 
@@ -68,6 +67,7 @@ def kb_admin_main() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📝 Qo'shimcha Matn", callback_data="admin:manage_extra"),
         InlineKeyboardButton(text="🔢 Kod Sanagichi", callback_data="admin:code_counter"),
     )
+    builder.row(InlineKeyboardButton(text="👤 Adminlar", callback_data="admin:manage_admins"))
     builder.row(InlineKeyboardButton(text="❌ Yopish", callback_data="admin:close"))
     return builder.as_markup()
 
@@ -87,7 +87,6 @@ def kb_admin_manage_chats(chats: list[RequiredChat]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for chat in chats:
         icon = "📢" if chat.chat_type == "channel" else "👥"
-        # A'zolar soni DB da saqlangan bo'lsa ko'rsatamiz
         members = f" · {chat.member_count:,}" if chat.member_count >= 0 else ""
         builder.row(
             InlineKeyboardButton(
