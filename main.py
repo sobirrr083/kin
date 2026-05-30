@@ -51,12 +51,18 @@ async def main() -> None:
 
     # Dinamik adminlarni DB dan yuklash
     from database.engine import async_session_maker
-    from database.queries import get_dynamic_admin_ids
+    from database.queries import get_dynamic_admin_ids, get_required_chats
     from filters.admin import update_dynamic_admins
     async with async_session_maker() as _startup_session:
         _dyn_ids = await get_dynamic_admin_ids(_startup_session)
         update_dynamic_admins(_dyn_ids)
         logger.info("Dinamik adminlar yuklandi: %s", _dyn_ids)
+
+        # Majburiy kanallar mavjudligini logga yozamiz
+        _req_chats = await get_required_chats(_startup_session)
+        logger.info("Majburiy kanallar soni: %d → %s",
+                    len(_req_chats),
+                    [(c.chat_id, c.title) for c in _req_chats])
 
     bot = Bot(
         token=settings.BOT_TOKEN,

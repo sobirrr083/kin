@@ -14,7 +14,6 @@ from database.models import RequiredChat
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def kb_language_select() -> InlineKeyboardMarkup:
-    """Til tanlash tugmalari."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="🇺🇿 O'zbek tili", callback_data="lang:uz"),
@@ -25,21 +24,32 @@ def kb_language_select() -> InlineKeyboardMarkup:
 
 def kb_subscription(chats: list[RequiredChat], lang: str) -> InlineKeyboardMarkup:
     """
-    Har bir majburiy kanal/guruh uchun 'Qo'shilish' tugmasi,
-    pastda esa 'Tekshirish' tugmasi.
+    Har bir majburiy kanal/guruh uchun tugma.
+
+    Havola ustuvorligi:
+      1. @username  → t.me/username
+      2. invite_link
+      3. Agar ikkalasi ham yo'q → tugma chiqmaydi lekin Tekshirish tugmasi qoladi
+
+    Pastda har doim '✅ Tekshirish' tugmasi bo'ladi.
     """
     from locales import t
 
     builder = InlineKeyboardBuilder()
+
     for chat in chats:
+        icon = "📢" if chat.chat_type == "channel" else "👥"
+        label = f"{icon} {chat.title}"
+
         if chat.username:
             url = f"https://t.me/{chat.username.lstrip('@')}"
+            builder.row(InlineKeyboardButton(text=label, url=url))
         elif chat.invite_link:
-            url = chat.invite_link
+            builder.row(InlineKeyboardButton(text=label, url=chat.invite_link))
         else:
-            continue
-        label = "📢 " + chat.title if chat.chat_type == "channel" else "👥 " + chat.title
-        builder.row(InlineKeyboardButton(text=label, url=url))
+            # Havola yo'q — tugma bosilmaydi, faqat nom ko'rsatiladi
+            # callback_data bilan qo'yamiz (Telegram URL talab qilmaydi)
+            builder.row(InlineKeyboardButton(text=f"⚠️ {chat.title} (havola yo'q)", callback_data="sub_no_link"))
 
     builder.row(
         InlineKeyboardButton(
@@ -116,13 +126,4 @@ def kb_admin_back() -> InlineKeyboardMarkup:
 def kb_cancel() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin:cancel"))
-    return builder.as_markup()
-
-
-def kb_admin_extra_caption() -> InlineKeyboardMarkup:
-    """Extra caption boshqaruv tugmalari."""
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="➕ Qo'shish / Tahrirlash", callback_data="admin:set_extra"))
-    builder.row(InlineKeyboardButton(text="🗑 O'chirish", callback_data="admin:clear_extra"))
-    builder.row(InlineKeyboardButton(text="◀️ Orqaga", callback_data="admin:back"))
     return builder.as_markup()

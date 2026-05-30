@@ -1,17 +1,24 @@
 """
 handlers/user.py — Foydalanuvchi private chat handlerlari.
 
-Deep link oqimi:
-  /start 1111  →  kod FSM ga saqlanadi
-               →  til yo'q → til tanlash
-               →  til bor, a'zo emas → subscription so'rov (kod saqlanadi)
-               →  til bor, a'zo → kino darhol yuboriladi
+Oqim:
+  /start [kod]
+    → til yo'q         → til tanlash (kod pending da saqlanadi)
+    → a'zo emas        → subscription xabari (kod pending da saqlanadi)
+    → hamma joyida OK  → agar kod bor → kino yuboriladi
+                          agar kod yo'q → xush kelibsiz
 
-Oddiy /start:
-  /start → til yo'q → til tanlash
-         → til bor → xush kelibsiz
+  Til tanlangach:
+    → a'zo emas        → subscription xabari
+    → a'zo             → pending kino yoki xush kelibsiz
 
-check_sub → a'zolikni tekshiradi → a'zo bo'lsa pending kinoni yuboradi
+  check_sub bosilsa:
+    → a'zo emas        → xato xabar
+    → a'zo             → pending kino yoki xush kelibsiz
+
+  Kino kodi (4-5 xona, StateFilter(None)):
+    → Subscription middleware allaqachon tekshirgan
+    → to'g'ridan-to'g'ri kino yuboriladi
 """
 from __future__ import annotations
 
@@ -42,42 +49,28 @@ router = Router(name="user")
 router.message.filter(F.chat.type == "private")
 
 
-# FSM — deep link dan kelgan kino kodini a'zolik tekshirilguncha saqlash
 class UserStates(StatesGroup):
     pending_movie_code = State()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Kino yuborish yordamchi funksiyasi
+# Kino yuborish
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _send_movie(
-    bot: Bot,
-    chat_id: int,
-    session: AsyncSession,
-    code: str,
-    lang: str,
-) -> None:
-    """
-    Kino kodiga mos filmni yuboradi.
-    extra_caption bo'lsa — caption ga qo'shadi.
-    """
+async def _send_movie(bot: Bot, chat_id: int, session: AsyncSession, code: str, lang: str) -> None:
     movie = await get_movie_by_code(session, code)
     if movie is None:
         await bot.send_message(chat_id, t(lang, "movie_not_found", code=code), parse_mode="HTML")
         return
 
-    # Caption quramiz
     if movie.title:
         caption = t(lang, "movie_caption", title=movie.title, code=movie.code)
     else:
         caption = t(lang, "movie_caption_no_title", code=movie.code)
 
-    # Qo'shimcha matn bo'lsa qo'shamiz
     if movie.extra_caption:
         caption = f"{caption}\n\n{movie.extra_caption}"
 
-    # Har doim qo'shiladigan qat'iy matn (oxirida)
     caption = f"{caption}\n\nTezkor Cinema - 🍿 Kino olamiga eng qisqa yo'l."
 
     try:
@@ -91,8 +84,23 @@ async def _send_movie(
         await bot.send_message(chat_id, t(lang, "movie_send_error", code=code), parse_mode="HTML")
 
 
+async def _show_subscription(
+    target: Message | CallbackQuery,
+    not_subscribed: list,
+    lang: str,
+) -> None:
+    """Subscription xabarini chiqaradi (Message yoki CallbackQuery uchun)."""
+    kb = kb_subscription(not_subscribed, lang)
+    text = t(lang, "subscribe_required")
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await target.answer()
+    else:
+        await target.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# /start — deep link bilan va oddiy
+# /start
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.message(CommandStart())
@@ -103,53 +111,47 @@ async def cmd_start(
     bot: Bot,
     command: CommandObject,
 ) -> None:
+    await state.clear()
     user = message.from_user
     db_user, _ = await get_or_create_user(
         session, user_id=user.id, username=user.username, full_name=user.full_name,
     )
 
-    # Deep link dan kino kodi kelganmi? → /start 1111
-    deep_link_code: str | None = None
+    # Deep link kodi
+    deep_code: str | None = None
     if command.args and command.args.strip():
         raw = command.args.strip()
-        # Faqat harf va raqamdan iborat bo'lsa — kino kodi
         if raw.isalnum():
-            deep_link_code = raw
-            logger.info("Deep link kod keldi: code=%s user=%s", deep_link_code, user.id)
+            deep_code = raw
+            logger.info("Deep link: code=%s user=%s", deep_code, user.id)
 
-    # Til tanlanmagan → tilni so'rash (kodni saqlaymiz)
+    # ── 1. Til yo'q → til tanlash ─────────────────────────────────────────────
     if not db_user.language:
-        if deep_link_code:
+        if deep_code:
             await state.set_state(UserStates.pending_movie_code)
-            await state.update_data(pending_code=deep_link_code)
+            await state.update_data(pending_code=deep_code)
         await message.answer(t("uz", "choose_language"), reply_markup=kb_language_select(), parse_mode="HTML")
         return
 
     lang = db_user.language
 
-    # A'zolikni tekshiramiz
+    # ── 2. Subscription tekshiruvi ─────────────────────────────────────────────
     required_chats = await get_required_chats(session)
     if required_chats:
         not_subscribed = await check_user_subscriptions(bot, user.id, required_chats)
         if not_subscribed:
-            if deep_link_code:
+            if deep_code:
                 await state.set_state(UserStates.pending_movie_code)
-                await state.update_data(pending_code=deep_link_code)
-            await message.answer(
-                t(lang, "subscribe_required"),
-                reply_markup=kb_subscription(not_subscribed, lang),
-                parse_mode="HTML",
-            )
+                await state.update_data(pending_code=deep_code)
+            await _show_subscription(message, not_subscribed, lang)
             return
 
-    # A'zo va til bor — agar kino kodi bo'lsa yuboramiz
-    if deep_link_code:
-        await state.clear()
-        await _send_movie(bot, message.chat.id, session, deep_link_code, lang)
-        return
-
-    # Oddiy /start — xush kelibsiz
-    await message.answer(t(lang, "welcome", name=user.first_name), parse_mode="HTML")
+    # ── 3. Hamma joyida OK ────────────────────────────────────────────────────
+    await state.clear()
+    if deep_code:
+        await _send_movie(bot, message.chat.id, session, deep_code, lang)
+    else:
+        await message.answer(t(lang, "welcome", name=user.first_name), parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -160,49 +162,45 @@ async def cmd_start(
 async def cb_set_language(
     callback: CallbackQuery, session: AsyncSession, bot: Bot, state: FSMContext
 ) -> None:
-    lang = callback.data.split(":")[1]
-    if lang not in ("uz", "ru"):
+    lang_code = callback.data.split(":")[1]
+    if lang_code not in ("uz", "ru"):
         await callback.answer("❌ Noto'g'ri til")
         return
 
     user = callback.from_user
     await get_or_create_user(session, user_id=user.id, username=user.username, full_name=user.full_name)
-    await set_user_language(session, user.id, lang)
-
-    await callback.message.edit_text(t(lang, "language_saved"), parse_mode="HTML")
+    await set_user_language(session, user.id, lang_code)
+    await callback.message.edit_text(t(lang_code, "language_saved"), parse_mode="HTML")
     await callback.answer()
 
-    # Pending kino kodi bormi?
     state_data = await state.get_data()
     pending_code: str | None = state_data.get("pending_code")
 
-    # A'zolikni tekshiramiz
+    # ── Subscription tekshiruvi ────────────────────────────────────────────────
     required_chats = await get_required_chats(session)
     if required_chats:
         not_subscribed = await check_user_subscriptions(bot, user.id, required_chats)
         if not_subscribed:
-            # Kodni saqlab subscription so'rav ko'rsatamiz
             if pending_code:
                 await state.set_state(UserStates.pending_movie_code)
                 await state.update_data(pending_code=pending_code)
             await callback.message.answer(
-                t(lang, "subscribe_required"),
-                reply_markup=kb_subscription(not_subscribed, lang),
+                t(lang_code, "subscribe_required"),
+                reply_markup=kb_subscription(not_subscribed, lang_code),
                 parse_mode="HTML",
             )
             return
 
-    # A'zo — pending kino bo'lsa yuboramiz
+    # ── A'zo ─────────────────────────────────────────────────────────────────
     await state.clear()
     if pending_code:
-        await _send_movie(bot, callback.message.chat.id, session, pending_code, lang)
-        return
-
-    await callback.message.answer(t(lang, "welcome", name=user.first_name), parse_mode="HTML")
+        await _send_movie(bot, callback.message.chat.id, session, pending_code, lang_code)
+    else:
+        await callback.message.answer(t(lang_code, "welcome", name=user.first_name), parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# A'zolikni tekshirish tugmasi
+# A'zolikni tekshirish
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "check_sub")
@@ -214,47 +212,58 @@ async def cb_check_subscription(
     lang = db_user.language if db_user else "uz"
 
     required_chats = await get_required_chats(session)
+
+    # Kanallar yo'q yoki hammaga a'zo
     if not required_chats:
         await state.clear()
         await callback.message.edit_text(t(lang, "now_subscribed"), parse_mode="HTML")
         await callback.answer()
+        await callback.message.answer(t(lang, "welcome", name=callback.from_user.first_name), parse_mode="HTML")
         return
 
     not_subscribed = await check_user_subscriptions(bot, user_id, required_chats)
+
     if not_subscribed:
+        # Hali a'zo emas — tugmalarni yangilaymiz (yangi holat bo'lishi mumkin)
+        await callback.message.edit_reply_markup(
+            reply_markup=kb_subscription(not_subscribed, lang)
+        )
         await callback.answer(t(lang, "still_not_subscribed"), show_alert=True)
         return
 
-    # Barcha kanallarga a'zo ✅
+    # ── Barcha kanallarga a'zo ✅ ─────────────────────────────────────────────
     await update_user_activity(session, user_id)
     await callback.message.edit_text(t(lang, "now_subscribed"), parse_mode="HTML")
     await callback.answer()
 
-    # Pending kino kodi bormi?
     state_data = await state.get_data()
     pending_code: str | None = state_data.get("pending_code")
     await state.clear()
 
     if pending_code:
-        # Avval kino yuboramiz, keyin xush kelibsiz
         await _send_movie(bot, callback.message.chat.id, session, pending_code, lang)
     else:
         await callback.message.answer(t(lang, "welcome", name=callback.from_user.first_name), parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Kino kodi — oddiy xabar orqali
+# Havola yo'q kanal tugmasi (no-op)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "sub_no_link")
+async def cb_sub_no_link(callback: CallbackQuery) -> None:
+    await callback.answer("⚠️ Bu kanal uchun havola yo'q. Admin bilan bog'laning.", show_alert=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Kino kodi — matn orqali (4-5 xona, hech qanday FSM holati yo'q)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.message(StateFilter(None), F.text.regexp(r"^[A-Za-z0-9]{4,5}$"))
 async def handle_movie_code(message: Message, session: AsyncSession, bot: Bot) -> None:
     """
-    Alphanumeric xabar → kino kodi sifatida qabul qilinadi.
-
-    StateFilter(None) — faqat hech qanday aktiv FSM holati bo'lmagan vaqtda ishlaydi.
-    Agar admin waiting_add_chat, waiting_add_admin yoki boshqa holatda bo'lsa —
-    bu handler UMUMAN CHAQIRILMAYDI. Shu tarzda kanal IDlari kino kodi
-    sifatida qabul qilinishi 100% oldini olinadi.
+    StateFilter(None) — FSM holati bo'lganida (admin panel, pending) ishlamaydi.
+    Subscription tekshiruvi middleware tomonidan allaqachon o'tkazilgan.
     """
     db_user = await get_user_by_id(session, message.from_user.id)
     lang = db_user.language if db_user else "uz"
